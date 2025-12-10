@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -24,6 +25,59 @@ var (
 	account = ""
 	session = ""
 )
+
+// extractThinkingAndSignature phát hiện và tách các block thinking và signature từ text content
+// Trả về một mảng các content parts:
+// - Nếu tìm thấy cả thinking và signature: trả về [thinking_part, text_part]
+// - Nếu không tìm thấy: trả về [text_part]
+func extractThinkingAndSignature(text string) []interface{} {
+	// Regex để tìm các block markdown thinking và signature
+	thinkingRegex := regexp.MustCompile("```plaintext:Thinking\\n([\\s\\S]*?)```")
+	signatureRegex := regexp.MustCompile("```plaintext:Signature:([\\s\\S]*?)```")
+	
+
+	thinkingMatch := thinkingRegex.FindStringSubmatch(text)
+	signatureMatch := signatureRegex.FindStringSubmatch(text)
+	// Nếu tìm thấy cả 2 blocks
+	if len(thinkingMatch) > 0 && len(signatureMatch) > 0 {
+		thinkingText := thinkingMatch[1]
+		signatureText := signatureMatch[1]
+
+		// Xóa các blocks khỏi text gốc
+		remainingText := thinkingRegex.ReplaceAllString(text, "")
+		remainingText = signatureRegex.ReplaceAllString(remainingText, "")
+		remainingText = strings.TrimSpace(remainingText)
+
+		var parts []interface{}
+
+		// Part 1: thinking block với thinking và signature
+		thinkingPart := map[string]interface{}{
+			"type":      "thinking",
+			"thinking":  thinkingText,
+			"signature": signatureText,
+		}
+		parts = append(parts, thinkingPart)
+
+		// Part 2: phần text còn lại (nếu có)
+		if remainingText != "" {
+			textPart := map[string]interface{}{
+				"type": "text",
+				"text": remainingText,
+			}
+			parts = append(parts, textPart)
+		}
+
+		return parts
+	}
+
+	// Không tìm thấy cả 2 blocks, trả về text thông thường
+	return []interface{}{
+		map[string]interface{}{
+			"type": "text",
+			"text": text,
+		},
+	}
+}
 
 // ConvertOpenAIRequestToClaude parses and transforms an OpenAI Chat Completions API request into Claude Code API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
@@ -132,6 +186,9 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	// Stream configuration to enable or disable streaming responses
 	out, _ = sjson.Set(out, "stream", stream)
+	if system := root.Get("system"); system.Exists() {
+		out, _ = sjson.SetRaw(out, "system", system.Raw)
+	}
 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
@@ -169,18 +226,18 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				// Handle content based on its type (string or array)
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
-					part := `{"type":"text","text":""}`
-					part, _ = sjson.Set(part, "text", contentResult.String())
-					msg, _ = sjson.SetRaw(msg, "content.-1", part)
+					// Simple text content conversion với xử lý thinking và signature blocks
+					msg["content"] = extractThinkingAndSignature(contentResult.String())
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
 						partType := part.Get("type").String()
 
 						switch partType {
 						case "text":
-							textPart := `{"type":"text","text":""}`
-							textPart, _ = sjson.Set(textPart, "text", part.Get("text").String())
-							msg, _ = sjson.SetRaw(msg, "content.-1", textPart)
+							// Text part conversion với xử lý thinking và signature blocks
+							textContent := part.Get("text").String()
+							extractedParts := extractThinkingAndSignature(textContent)
+							contentParts = append(contentParts, extractedParts...)
 
 						case "image_url":
 							// Convert OpenAI image format to Claude Code format
@@ -199,6 +256,31 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 									msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
 								}
 							}
+						case "tool_use": 
+							// Handle tool result messages conversion
+							toolCallID := part.Get("id").String()
+							name := part.Get("name").String()
+							input := part.Get("input").Value()
+
+							// Create tool result message in Claude Code format
+							contentParts =  append(contentParts, map[string]interface{}{
+								"type":        "tool_use",
+								"id": toolCallID,
+								"name": name,
+								"input": input,
+							})
+							
+						case "tool_result": 
+							// Handle tool result messages conversion
+							toolCallID := part.Get("tool_use_id").String()
+							content := part.Get("content").Value()
+
+							// Create tool result message in Claude Code format
+							contentParts =  append(contentParts, map[string]interface{}{
+								"type":        "tool_result",
+								"tool_use_id": toolCallID,
+								"content":     content,
+							})
 						}
 						return true
 					})
@@ -276,8 +358,21 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", parameters.Raw)
 				}
 
-				out, _ = sjson.SetRaw(out, "tools.-1", anthropicTool)
-				hasAnthropicTools = true
+				anthropicTools = append(anthropicTools, anthropicTool)
+			} else if(!tool.Get("type").Exists()) {
+				//compatible with cursor
+				anthropicTool := map[string]interface{}{
+					"name": tool.Get("name").String(),
+					"description": tool.Get("description").String(),
+				}
+				
+				if parameters := tool.Get("input_schema"); parameters.Exists() {
+					anthropicTool["input_schema"] = parameters.Value()
+				} else if parameters = tool.Get("input_schema"); parameters.Exists() {
+					anthropicTool["input_schema"] = parameters.Value()
+				}
+				
+				anthropicTools = append(anthropicTools, anthropicTool)
 			}
 			return true
 		})
