@@ -349,14 +349,24 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 		targetModelName = extractedModelName
 	}
 
+	// CRITICAL: Resolve alias BEFORE provider lookup
+	// This allows "claude-4.5-opus-thinking" to become "claude-opus-4-5-thinking"
+	// which can then be found in the registry
+	targetModelName = util.ResolveModelAlias(targetModelName)
+
 	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
 	normalizedModel, metadata = normalizeModelMetadata(targetModelName)
 
 	if isDynamic {
 		providers = []string{providerName}
 	} else {
-		// For non-dynamic models, use the normalizedModel to get the provider name.
-		providers = util.GetProviderName(normalizedModel)
+		// For non-dynamic models, try to find provider using the alias-resolved model name first
+		providers = util.GetProviderName(targetModelName)
+		
+		// If not found, try with normalized model
+		if len(providers) == 0 {
+			providers = util.GetProviderName(normalizedModel)
+		}
 		if len(providers) == 0 && metadata != nil {
 			if originalRaw, ok := metadata[util.ThinkingOriginalModelMetadataKey]; ok {
 				if originalModel, okStr := originalRaw.(string); okStr {
