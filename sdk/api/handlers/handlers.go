@@ -739,24 +739,10 @@ func statusFromError(err error) int {
 	return 0
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
-	resolvedModelName := modelName
-	initialSuffix := thinking.ParseSuffix(modelName)
-	if initialSuffix.ModelName == "auto" {
-		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
-		if initialSuffix.HasSuffix {
-			resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
-		} else {
-			resolvedModelName = resolvedBase
-		}
-	} else {
-		resolvedModelName = util.ResolveAutoModel(modelName)
-	}
-
 	// CRITICAL: Resolve alias BEFORE provider lookup
 	// This allows "claude-4.5-opus-thinking" to become "claude-opus-4-5-thinking"
 	// which can then be found in the registry
-	targetModelName = util.ResolveModelAlias(targetModelName)
+	resolvedModelName = util.ResolveModelAlias(resolvedModelName)
 
 	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
 	normalizedModel, metadata = normalizeModelMetadata(targetModelName)
