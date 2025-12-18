@@ -37,9 +37,9 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 		log.Warnf("failed to load statistics: %v", err)
 	}
 
-	// Start auto-save mỗi 5 phút
+	// Start auto-save mỗi 1 phút
 	autoSaveCtx, autoSaveCancel := context.WithCancel(context.Background())
-	usage.StartAutoSave(autoSaveCtx, 5*time.Minute)
+	usage.StartAutoSave(autoSaveCtx, 1*time.Minute)
 
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
