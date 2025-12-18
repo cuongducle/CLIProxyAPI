@@ -207,9 +207,10 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	hourKey := timestamp.Hour()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.totalRequests++
+	currentRequests := s.totalRequests
+	
 	if success {
 		s.successCount++
 	} else {
@@ -234,6 +235,20 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+
+	s.mu.Unlock()
+
+	log.Debugf("Record(): request #%d recorded, model=%s, tokens=%d", currentRequests, modelName, totalTokens)
+
+	// Auto-save sau mỗi 10 requests để đảm bảo không mất dữ liệu
+	if currentRequests%10 == 0 {
+		go func() {
+			log.Infof("triggering auto-save after %d requests", currentRequests)
+			if err := s.Save(); err != nil {
+				log.Errorf("auto-save after %d requests failed: %v", currentRequests, err)
+			}
+		}()
+	}
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
@@ -384,10 +399,13 @@ func (s *RequestStatistics) Save() error {
 	}
 	filePath := GetStatsFilePath()
 	if filePath == "" {
+		log.Warn("Save() called but statsFilePath is empty, skipping")
 		return nil // Không có file path, skip save
 	}
 
 	snapshot := s.Snapshot()
+	log.Infof("Save(): total_requests=%d, file=%s", snapshot.TotalRequests, filePath)
+	
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal statistics: %w", err)
@@ -402,7 +420,7 @@ func (s *RequestStatistics) Save() error {
 	// Ghi file với atomic write (write to temp file, then rename)
 	tmpFile := filePath + ".tmp"
 	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
+		return fmt.Errorf("failed to write temp file %s: %w", tmpFile, err)
 	}
 
 	if err := os.Rename(tmpFile, filePath); err != nil {
@@ -411,7 +429,7 @@ func (s *RequestStatistics) Save() error {
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
-	log.Debugf("statistics saved to %s (%d bytes)", filePath, len(data))
+	log.Infof("statistics saved to %s (%d bytes)", filePath, len(data))
 	return nil
 }
 
@@ -513,6 +531,9 @@ func StartAutoSave(ctx context.Context, interval time.Duration) {
 	autoSaveMu.Lock()
 	defer autoSaveMu.Unlock()
 
+	filePath := GetStatsFilePath()
+	log.Infof("auto-save starting: interval=%v, file=%s", interval, filePath)
+
 	// Dừng auto-save cũ nếu đang chạy
 	if autoSaveCancel != nil {
 		autoSaveCancel()
@@ -529,13 +550,20 @@ func StartAutoSave(ctx context.Context, interval time.Duration) {
 				log.Debug("auto-save stopped")
 				return
 			case <-ticker.C:
+				stats := defaultRequestStatistics
+				stats.mu.RLock()
+				totalReqs := stats.totalRequests
+				stats.mu.RUnlock()
+				log.Infof("auto-save tick: saving %d requests to %s", totalReqs, GetStatsFilePath())
 				if err := defaultRequestStatistics.Save(); err != nil {
 					log.Errorf("auto-save statistics failed: %v", err)
+				} else {
+					log.Infof("auto-save completed successfully")
 				}
 			}
 		}
 	}()
-	log.Infof("auto-save started with interval %v", interval)
+	log.Infof("auto-save goroutine started with interval %v", interval)
 }
 
 // StopAutoSave dừng auto-save và save lần cuối.
