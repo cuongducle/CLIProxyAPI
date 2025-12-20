@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-	log "github.com/sirupsen/logrus"
 )
 
 type claudeToResponsesState struct {
@@ -426,6 +426,10 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
 			}
 		}
+
+		// Log thông tin token usage cho request Claude (Responses API)
+		log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, totalTokens: %d, reasoningTokens: %d.", modelName, st.InputTokens, st.OutputTokens, st.InputTokens+st.OutputTokens, reasoningTokens)
+
 		out = append(out, emitEvent("response.completed", completed))
 	}
 
@@ -677,17 +681,23 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
 	out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
 	out, _ = sjson.Set(out, "usage.total_tokens", total)
+	reasoningTokens := int64(0)
 	if reasoningBuf.Len() > 0 {
 		// Rough estimate similar to chat completions
-		reasoningTokens := int64(len(reasoningBuf.String()) / 4)
+		reasoningTokens = int64(len(reasoningBuf.String()) / 4)
 		if reasoningTokens > 0 {
 			out, _ = sjson.Set(out, "usage.output_tokens_details.reasoning_tokens", reasoningTokens)
 		}
 	}
 
-	// Log thông tin token usage cho request Claude
-	log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, totalTokens: %d, reasoningTokens: %d.", model, inputTokens, outputTokens, totalTokens, reasoningTokens)
-
+	// Log thông tin token usage cho request Claude (Responses API - NonStream)
+	modelName := ""
+	if requestRawJSON != nil {
+		if v := gjson.GetBytes(requestRawJSON, "model"); v.Exists() {
+			modelName = v.String()
+		}
+	}
+	log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, totalTokens: %d, reasoningTokens: %d.", modelName, inputTokens, outputTokens, total, reasoningTokens)
 
 	return out
 }
