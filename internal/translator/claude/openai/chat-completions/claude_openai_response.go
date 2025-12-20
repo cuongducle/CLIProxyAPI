@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -591,6 +592,22 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	} else {
 		out, _ = sjson.Set(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))
 	}
+
+	// Set usage information including prompt tokens, completion tokens, and total tokens
+	totalTokens := inputTokens + outputTokens
+	out, _ = sjson.Set(out, "usage.prompt_tokens", inputTokens)
+	out, _ = sjson.Set(out, "usage.completion_tokens", outputTokens)
+	out, _ = sjson.Set(out, "usage.total_tokens", totalTokens)
+
+	
+	// Add reasoning tokens to usage details if any reasoning content was processed
+	if reasoningTokens > 0 {
+		out, _ = sjson.Set(out, "usage.completion_tokens_details.reasoning_tokens", reasoningTokens)
+	}
+
+	// Log thông tin token usage cho request Claude
+	log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, totalTokens: %d, reasoningTokens: %d.", model, inputTokens, outputTokens, totalTokens, reasoningTokens)
+
 
 	return out
 }
