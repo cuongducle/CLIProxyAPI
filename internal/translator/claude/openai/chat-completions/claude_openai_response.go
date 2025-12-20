@@ -74,7 +74,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 	root := gjson.ParseBytes(rawJSON)
 	eventType := root.Get("type").String()
-
+	
 	// Base OpenAI streaming response template
 	template := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{"response_metadata":{}},"finish_reason":null}]}`
 
@@ -287,16 +287,21 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 		// Handle usage information for token counts
 		if usage := root.Get("usage"); usage.Exists() {
+			inputTokens := usage.Get("input_tokens").Int()
+			outputTokens := usage.Get("output_tokens").Int()
+			cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
+			cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
 			usageObj := map[string]interface{}{
-				"prompt_tokens":     usage.Get("input_tokens").Int(),
-				// "completion_tokens": usage.Get("output_tokens").Int(),
-				// "output_tokens":     usage.Get("output_tokens").Int(),
-				"completion_tokens": usage.Get("output_tokens").Int(),
-				"total_tokens":      usage.Get("input_tokens").Int() + usage.Get("output_tokens").Int(),
+				"input_tokens": inputTokens,
+				"prompt_tokens":     inputTokens,
+				"output_tokens": outputTokens,
+				"cache_creation_input_tokens": cacheCreationInputTokens,
+				"cache_read_input_tokens": cacheReadInputTokens,
 			}
 			template, _ = sjson.Set(template, "usage", usageObj)
 			// Log thông tin token usage cho request Claude
-			log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, totalTokens: %d.", modelName, usage.Get("input_tokens").Int(), usage.Get("output_tokens").Int(), usage.Get("input_tokens").Int() + usage.Get("output_tokens").Int())
+			totalTokens := inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens
+			log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, totalTokens)
 
 		}
 		return []string{template}
@@ -359,6 +364,7 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 // Returns:
 //   - string: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
+	log.Debug("ConvertClaudeResponseToOpenAINonStream called")
 	chunks := make([][]byte, 0)
 
 	lines := bytes.Split(rawJSON, []byte("\n"))
