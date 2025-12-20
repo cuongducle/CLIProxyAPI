@@ -39,3 +39,4 @@ _bmad/*
 # macOS
 .DS_Store
 ._*
+usage_statistics.json
