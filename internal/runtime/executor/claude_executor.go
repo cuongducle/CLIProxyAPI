@@ -130,6 +130,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		body = ensureCacheControl(body)
 	}
 
+	// Ensure temperature = 1 when thinking is enabled
+	body = ensureTemperatureForThinking(body)
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -270,6 +273,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if countCacheControls(body) == 0 {
 		body = ensureCacheControl(body)
 	}
+
+	// Ensure temperature = 1 when thinking is enabled
+	body = ensureTemperatureForThinking(body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -545,15 +551,62 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
-// disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
-// Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
-// See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
-func disableThinkingIfToolChoiceForced(body []byte) []byte {
-	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
-	// "auto" is allowed with thinking, but "any" or "tool" (specific tool) are not
-	if toolChoiceType == "any" || toolChoiceType == "tool" {
-		// Remove thinking configuration entirely to avoid API error
-		body, _ = sjson.DeleteBytes(body, "thinking")
+// injectThinkingConfig adds thinking configuration based on metadata using the unified flow.
+// It uses util.ResolveClaudeThinkingConfig which internally calls ResolveThinkingConfigFromMetadata
+// and NormalizeThinkingBudget, ensuring consistency with other executors like Gemini.
+func (e *ClaudeExecutor) injectThinkingConfig(modelName string, metadata map[string]any, body []byte) []byte {
+	budget, ok := util.ResolveClaudeThinkingConfig(modelName, metadata)
+	if !ok {
+		return body
+	}
+	return util.ApplyClaudeThinkingConfig(body, budget)
+}
+
+// ensureTemperatureForThinking sets temperature = 1 when thinking is enabled.
+// Claude API requires temperature = 1 when extended thinking is enabled.
+// This function should be called after all thinking configuration is finalized.
+func ensureTemperatureForThinking(body []byte) []byte {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "enabled" {
+		return body
+	}
+	// Khi thinking được bật, Claude API yêu cầu temperature phải là 1
+	body, _ = sjson.SetBytes(body, "temperature", 1)
+	return body
+}
+
+// ensureMaxTokensForThinking ensures max_tokens > thinking.budget_tokens when thinking is enabled.
+// Anthropic API requires this constraint; violating it returns a 400 error.
+// This function should be called after all thinking configuration is finalized.
+// It looks up the model's MaxCompletionTokens from the registry to use as the cap.
+func ensureMaxTokensForThinking(modelName string, body []byte) []byte {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "enabled" {
+		return body
+	}
+
+	budgetTokens := gjson.GetBytes(body, "thinking.budget_tokens").Int()
+	if budgetTokens <= 0 {
+		return body
+	}
+
+	maxTokens := gjson.GetBytes(body, "max_tokens").Int()
+
+	// Look up the model's max completion tokens from the registry
+	maxCompletionTokens := 0
+	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(modelName); modelInfo != nil {
+		maxCompletionTokens = modelInfo.MaxCompletionTokens
+	}
+
+	// Fall back to budget + buffer if registry lookup fails or returns 0
+	const fallbackBuffer = 4000
+	requiredMaxTokens := budgetTokens + fallbackBuffer
+	if maxCompletionTokens > 0 {
+		requiredMaxTokens = int64(maxCompletionTokens)
+	}
+
+	if maxTokens < requiredMaxTokens {
+		body, _ = sjson.SetBytes(body, "max_tokens", requiredMaxTokens)
 	}
 	return body
 }
