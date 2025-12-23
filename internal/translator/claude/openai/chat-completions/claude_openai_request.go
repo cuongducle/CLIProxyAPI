@@ -16,7 +16,9 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -25,28 +27,97 @@ var (
 	user    = ""
 	account = ""
 	session = ""
+	
+	// Regex patterns cho việc parse thinking content
+	// Pattern cho <think> tag
+	thinkTagRegex = regexp.MustCompile(`<think>([\s\S]*?)</think>`)
+	// Pattern cho thinkId marker: ```plaintext:thinkId:xxx```
+	thinkIdRegex = regexp.MustCompile("```plaintext:thinkId:([a-f0-9]+)```")
+	// Legacy patterns cho backward compatibility
+	legacyThinkingRegex = regexp.MustCompile("```plaintext:Thinking\\n([\\s\\S]*?)```")
+	legacySignatureRegex = regexp.MustCompile("```plaintext:Signature:([\\s\\S]*?)```")
 )
 
-// extractThinkingAndSignature phát hiện và tách các block thinking và signature từ text content
-// Trả về một mảng các content parts:
-// - Nếu tìm thấy cả thinking và signature: trả về [thinking_part, text_part]
-// - Nếu không tìm thấy: trả về [text_part]
-func extractThinkingAndSignature(text string) []interface{} {
-	// Regex để tìm các block markdown thinking và signature
-	thinkingRegex := regexp.MustCompile("```plaintext:Thinking\\n([\\s\\S]*?)```")
-	signatureRegex := regexp.MustCompile("```plaintext:Signature:([\\s\\S]*?)```")
-	
+// deriveSessionID tạo sessionID từ hash của first user message
+// SessionID dùng để lookup thinking cache
+func deriveSessionID(rawJSON []byte) string {
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	for _, msg := range messages.Array() {
+		if msg.Get("role").String() == "user" {
+			content := msg.Get("content").String()
+			if content == "" {
+				content = msg.Get("content.0.text").String()
+			}
+			if content != "" {
+				return cache.GenerateThinkingID(content)
+			}
+		}
+	}
+	return ""
+}
 
-	thinkingMatch := thinkingRegex.FindStringSubmatch(text)
-	signatureMatch := signatureRegex.FindStringSubmatch(text)
-	// Nếu tìm thấy cả 2 blocks
+// extractThinkingFromContent trích xuất thinking từ text content
+// Hỗ trợ 2 formats:
+// 1. New format: thinkId marker ```plaintext:thinkId:xxx``` -> lookup cache
+// 2. Legacy format: ```plaintext:Thinking\n...\n``` + ```plaintext:Signature:...```
+func extractThinkingFromContent(sessionID, text string) []interface{} {
+	// Thử tìm thinkId marker trước (new format)
+	idMatch := thinkIdRegex.FindStringSubmatch(text)
+	if len(idMatch) > 1 {
+		thinkingID := idMatch[1]
+		entry := cache.GetCachedThinking(sessionID, thinkingID)
+		
+		if entry != nil && cache.HasValidSignature(entry.Signature) {
+			// Found valid cache → restore thinking
+			log.Debugf("Found cached thinking (sessionID=%s, thinkingID=%s)", sessionID, thinkingID)
+			
+			// Remove <think> tag và thinkId marker từ text
+			remainingText := thinkTagRegex.ReplaceAllString(text, "")
+			remainingText = thinkIdRegex.ReplaceAllString(remainingText, "")
+			remainingText = strings.TrimSpace(remainingText)
+			
+			var parts []interface{}
+			
+			// Part 1: thinking block với thinking và signature từ cache
+			thinkingPart := map[string]interface{}{
+				"type":      "thinking",
+				"thinking":  entry.ThinkingText,
+				"signature": entry.Signature,
+			}
+			parts = append(parts, thinkingPart)
+			
+			// Part 2: phần text còn lại (nếu có)
+			if remainingText != "" {
+				textPart := map[string]interface{}{
+					"type": "text",
+					"text": remainingText,
+				}
+				parts = append(parts, textPart)
+			}
+			
+			return parts
+		}
+		
+		// Cache miss - log và tiếp tục xử lý như không có thinking
+		log.Debugf("Thinking cache miss (sessionID=%s, thinkingID=%s) - will regenerate", sessionID, thinkingID)
+	}
+	
+	// Thử legacy format (backward compatibility)
+	thinkingMatch := legacyThinkingRegex.FindStringSubmatch(text)
+	signatureMatch := legacySignatureRegex.FindStringSubmatch(text)
 	if len(thinkingMatch) > 0 && len(signatureMatch) > 0 {
 		thinkingText := thinkingMatch[1]
 		signatureText := signatureMatch[1]
+		
+		// Unescape ``` trong thinking text
+		thinkingText = strings.ReplaceAll(thinkingText, "\\`\\`\\`", "```")
 
 		// Xóa các blocks khỏi text gốc
-		remainingText := thinkingRegex.ReplaceAllString(text, "")
-		remainingText = signatureRegex.ReplaceAllString(remainingText, "")
+		remainingText := legacyThinkingRegex.ReplaceAllString(text, "")
+		remainingText = legacySignatureRegex.ReplaceAllString(remainingText, "")
 		remainingText = strings.TrimSpace(remainingText)
 
 		var parts []interface{}
@@ -70,12 +141,23 @@ func extractThinkingAndSignature(text string) []interface{} {
 
 		return parts
 	}
-
-	// Không tìm thấy cả 2 blocks, trả về text thông thường
+	
+	// No valid thinking format found → clean up và return text only
+	// Remove any orphan markers
+	cleanText := thinkTagRegex.ReplaceAllString(text, "")
+	cleanText = thinkIdRegex.ReplaceAllString(cleanText, "")
+	cleanText = legacyThinkingRegex.ReplaceAllString(cleanText, "")
+	cleanText = legacySignatureRegex.ReplaceAllString(cleanText, "")
+	cleanText = strings.TrimSpace(cleanText)
+	
+	if cleanText == "" {
+		return nil
+	}
+	
 	return []interface{}{
 		map[string]interface{}{
 			"type": "text",
-			"text": text,
+			"text": cleanText,
 		},
 	}
 }
@@ -99,6 +181,9 @@ func extractThinkingAndSignature(text string) []interface{} {
 //   - []byte: The transformed request data in Claude Code API format
 func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
+
+	// Derive sessionID để lookup thinking cache
+	sessionID := deriveSessionID(rawJSON)
 
 	if account == "" {
 		u, _ := uuid.NewRandom()
@@ -161,7 +246,12 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Temperature setting for controlling response randomness
-	if temp := root.Get("temperature"); temp.Exists() {
+	// Khi thinking được bật từ request JSON, set temperature = 1
+	// Note: Khi thinking được bật từ metadata (model alias), temperature sẽ được set trong claude_executor.go
+	thinkingEnabled := gjson.Get(out, "thinking.type").String() == "enabled"
+	if thinkingEnabled {
+		out, _ = sjson.Set(out, "temperature", 1)
+	} else if temp := root.Get("temperature"); temp.Exists() {
 		out, _ = sjson.Set(out, "temperature", temp.Float())
 	}
 
@@ -210,9 +300,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				// Handle content based on its type (string or array)
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
-					// part := `{"type":"text","text":""}`
-					// part, _ = sjson.Set(part, "text", contentResult.String())
-					parts := extractThinkingAndSignature(contentResult.String())
+					parts := extractThinkingFromContent(sessionID, contentResult.String())
 					for _, part := range parts {
 						msg, _ = sjson.Set(msg, "content.-1", part)
 					}
@@ -222,11 +310,9 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 						switch partType {
 						case "text":
-							//textPart := `{"type":"text","text":""}`
-							//textPart, _ = sjson.Set(textPart, "text", part.Get("text").String())
-							parts := extractThinkingAndSignature(part.Get("text").String())
-							for _, part := range parts {
-								msg, _ = sjson.Set(msg, "content.-1", part)
+							parts := extractThinkingFromContent(sessionID, part.Get("text").String())
+							for _, p := range parts {
+								msg, _ = sjson.Set(msg, "content.-1", p)
 							}
 
 						case "image_url":

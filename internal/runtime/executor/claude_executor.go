@@ -77,6 +77,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
 	body = ensureMaxTokensForThinking(req.Model, body)
 
+	// Ensure temperature = 1 when thinking is enabled
+	body = ensureTemperatureForThinking(body)
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -187,6 +190,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
 	body = ensureMaxTokensForThinking(req.Model, body)
+
+	// Ensure temperature = 1 when thinking is enabled
+	body = ensureTemperatureForThinking(body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -459,6 +465,19 @@ func (e *ClaudeExecutor) injectThinkingConfig(modelName string, metadata map[str
 		return body
 	}
 	return util.ApplyClaudeThinkingConfig(body, budget)
+}
+
+// ensureTemperatureForThinking sets temperature = 1 when thinking is enabled.
+// Claude API requires temperature = 1 when extended thinking is enabled.
+// This function should be called after all thinking configuration is finalized.
+func ensureTemperatureForThinking(body []byte) []byte {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "enabled" {
+		return body
+	}
+	// Khi thinking được bật, Claude API yêu cầu temperature phải là 1
+	body, _ = sjson.SetBytes(body, "temperature", 1)
+	return body
 }
 
 // ensureMaxTokensForThinking ensures max_tokens > thinking.budget_tokens when thinking is enabled.

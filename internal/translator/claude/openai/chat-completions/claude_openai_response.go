@@ -12,10 +12,33 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// deriveSessionIDFromRequest generates a stable session ID from the original request.
+// Uses the hash of the first user message to identify the conversation.
+func deriveSessionIDFromRequest(rawJSON []byte) string {
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	for _, msg := range messages.Array() {
+		if msg.Get("role").String() == "user" {
+			content := msg.Get("content").String()
+			if content == "" {
+				// Try to get text from content array
+				content = msg.Get("content.0.text").String()
+			}
+			if content != "" {
+				return cache.GenerateThinkingID(content)
+			}
+		}
+	}
+	return ""
+}
 
 var (
 	dataTag = []byte("data:")
@@ -26,6 +49,8 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	CreatedAt    int64
 	ResponseID   string
 	FinishReason string
+	// SessionID để cache thinking (derived từ original request)
+	SessionID string
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator    map[int]*ToolCallAccumulator
 	// Thinking accumulator for streaming
@@ -60,10 +85,13 @@ type ThinkingAccumulator struct {
 //   - []string: A slice of strings, each containing an OpenAI-compatible JSON response
 func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
 	if *param == nil {
+		// Derive sessionID từ original request
+		sessionID := deriveSessionIDFromRequest(originalRequestRawJSON)
 		*param = &ConvertAnthropicResponseToOpenAIParams{
 			CreatedAt:    0,
 			ResponseID:   "",
 			FinishReason: "",
+			SessionID:    sessionID,
 		}
 	}
 
@@ -148,8 +176,8 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 				(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index] = &ThinkingAccumulator{}
 
-				// Stream opening tag ngay lập tức
-				template, _ = sjson.Set(template, "choices.0.delta.content", "```plaintext:Thinking\n")
+				// Stream opening <think> tag
+				template, _ = sjson.Set(template, "choices.0.delta.content", "<think>\n")
 				return []string{template}
 			}
 		}
@@ -172,14 +200,18 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				// Stream reasoning/thinking content ngay lập tức
 				if thinking := delta.Get("thinking"); thinking.Exists() {
 					index := int(root.Get("index").Int())
-					thinkingText := strings.ReplaceAll(thinking.String(), "```", "\\`\\`\\`")
+					// Lưu thinking text gốc (không escape) để cache
+					originalThinkingText := thinking.String()
+					// Escape ``` trong thinking để không break format khi hiển thị
+					escapedThinkingText := strings.ReplaceAll(originalThinkingText, "```", "\\`\\`\\`")
 					if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator != nil {
 						if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index]; exists {
-							accumulator.Thinking.WriteString(thinkingText)
+							// Lưu text gốc để cache signature đúng
+							accumulator.Thinking.WriteString(originalThinkingText)
 						}
 					}
-					// Stream thinking delta ngay lập tức giống text_delta
-					template, _ = sjson.Set(template, "choices.0.delta.content", thinkingText)
+					// Stream escaped thinking delta để hiển thị
+					template, _ = sjson.Set(template, "choices.0.delta.content", escapedThinkingText)
 					hasContent = true
 				}
 			case "signature_delta":
@@ -242,23 +274,23 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 		// Check for thinking accumulator
 		if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator != nil {
 			if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index]; exists {
-				// Build closing tag với metadata
-				// thinkingText := accumulator.Thinking.String()
+				// Lấy thinking text và signature đã accumulate
+				thinkingText := accumulator.Thinking.String()
 				signatureText := accumulator.Signature.String()
 				
-				// Tạo JSON object cho reasoning metadata
-				// reasoningJSON := map[string]interface{}{
-				// 	"thinking":  thinkingText,
-				// 	"signature": signatureText,
-				// }
-				// reasoningJSONBytes, _ := json.Marshal(reasoningJSON)
+				// Generate thinkingID từ hash của thinking text
+				thinkingID := cache.GenerateThinkingID(thinkingText)
 				
-				// Stream metadata và closing tag
-				// Format: {"thinking":"xxx","signature":"xxx"}</reasoning>
-				closingContent := "```\n"
-				signatureContent := "```plaintext:Signature:" + signatureText + "```\n"
-				template, _ = sjson.Set(template, "choices.0.delta.content", closingContent + signatureContent)
-				// template, _ = sjson.Set(template, "choices.0.delta.content", signatureContent)
+				// Cache thinking với signature
+				sessionID := (*param).(*ConvertAnthropicResponseToOpenAIParams).SessionID
+				if sessionID != "" && thinkingText != "" {
+					cache.CacheThinking(sessionID, thinkingID, thinkingText, signatureText)
+					log.Debugf("Cached thinking block (sessionID=%s, thinkingID=%s, textLen=%d)", sessionID, thinkingID, len(thinkingText))
+				}
+				
+				// Stream closing </think> tag + hidden thinkId marker
+				closingContent := "\n</think>\n```plaintext:thinkId:" + thinkingID + "```\n"
+				template, _ = sjson.Set(template, "choices.0.delta.content", closingContent)
 			
 				// Clean up the accumulator for this index
 				delete((*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator, index)

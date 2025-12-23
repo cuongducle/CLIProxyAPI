@@ -16,7 +16,7 @@ type SignatureEntry struct {
 
 const (
 	// SignatureCacheTTL is how long signatures are valid
-	SignatureCacheTTL = 1 * time.Hour
+	SignatureCacheTTL = 2 * time.Hour
 
 	// MaxEntriesPerSession limits memory usage per session
 	MaxEntriesPerSession = 100
@@ -161,4 +161,148 @@ func ClearSignatureCache(sessionID string) {
 // HasValidSignature checks if a signature is valid (non-empty and long enough)
 func HasValidSignature(signature string) bool {
 	return signature != "" && len(signature) >= MinValidSignatureLen
+}
+
+// ============================================================================
+// Thinking Cache - Lưu trữ toàn bộ thinking text + signature theo thinkingID
+// ============================================================================
+
+// ThinkingEntry holds cached thinking content with signature
+type ThinkingEntry struct {
+	ThinkingText string
+	Signature    string
+	Timestamp    time.Time
+}
+
+const (
+	// ThinkingCacheTTL là thời gian thinking cache còn hiệu lực (dài hơn signature cache)
+	ThinkingCacheTTL = 2 * time.Hour
+
+	// MaxThinkingEntriesPerSession giới hạn số thinking entries mỗi session
+	MaxThinkingEntriesPerSession = 100
+
+	// ThinkingIDLen là độ dài của thinkingID (32 hex chars = 128-bit)
+	ThinkingIDLen = 32
+)
+
+// thinkingCache stores thinking by sessionId -> thinkingId -> ThinkingEntry
+var thinkingCache sync.Map
+
+// thinkingSessionCache là inner map type cho thinking cache
+type thinkingSessionCache struct {
+	mu      sync.RWMutex
+	entries map[string]ThinkingEntry
+}
+
+// GenerateThinkingID tạo hash-based ID từ thinking text
+func GenerateThinkingID(thinkingText string) string {
+	h := sha256.Sum256([]byte(thinkingText))
+	return hex.EncodeToString(h[:])[:ThinkingIDLen]
+}
+
+// getOrCreateThinkingSession gets or creates a thinking session cache
+func getOrCreateThinkingSession(sessionID string) *thinkingSessionCache {
+	if val, ok := thinkingCache.Load(sessionID); ok {
+		return val.(*thinkingSessionCache)
+	}
+	sc := &thinkingSessionCache{entries: make(map[string]ThinkingEntry)}
+	actual, _ := thinkingCache.LoadOrStore(sessionID, sc)
+	return actual.(*thinkingSessionCache)
+}
+
+// CacheThinking lưu thinking content với signature theo sessionID và thinkingID
+func CacheThinking(sessionID, thinkingID, thinkingText, signature string) {
+	if sessionID == "" || thinkingID == "" || thinkingText == "" {
+		return
+	}
+
+	sc := getOrCreateThinkingSession(sessionID)
+
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	// Evict expired entries nếu đạt capacity
+	if len(sc.entries) >= MaxThinkingEntriesPerSession {
+		now := time.Now()
+		for key, entry := range sc.entries {
+			if now.Sub(entry.Timestamp) > ThinkingCacheTTL {
+				delete(sc.entries, key)
+			}
+		}
+		// Nếu vẫn đạt capacity, xóa entries cũ nhất
+		if len(sc.entries) >= MaxThinkingEntriesPerSession {
+			oldest := make([]struct {
+				key string
+				ts  time.Time
+			}, 0, len(sc.entries))
+			for key, entry := range sc.entries {
+				oldest = append(oldest, struct {
+					key string
+					ts  time.Time
+				}{key, entry.Timestamp})
+			}
+			sort.Slice(oldest, func(i, j int) bool {
+				return oldest[i].ts.Before(oldest[j].ts)
+			})
+
+			toRemove := len(oldest) / 4
+			if toRemove < 1 {
+				toRemove = 1
+			}
+
+			for i := 0; i < toRemove; i++ {
+				delete(sc.entries, oldest[i].key)
+			}
+		}
+	}
+
+	sc.entries[thinkingID] = ThinkingEntry{
+		ThinkingText: thinkingText,
+		Signature:    signature,
+		Timestamp:    time.Now(),
+	}
+}
+
+// GetCachedThinking lấy cached thinking entry theo sessionID và thinkingID
+// Trả về nil nếu không tìm thấy hoặc đã expired
+func GetCachedThinking(sessionID, thinkingID string) *ThinkingEntry {
+	if sessionID == "" || thinkingID == "" {
+		return nil
+	}
+
+	val, ok := thinkingCache.Load(sessionID)
+	if !ok {
+		return nil
+	}
+	sc := val.(*thinkingSessionCache)
+
+	sc.mu.RLock()
+	entry, exists := sc.entries[thinkingID]
+	sc.mu.RUnlock()
+
+	if !exists {
+		return nil
+	}
+
+	// Check if expired
+	if time.Since(entry.Timestamp) > ThinkingCacheTTL {
+		sc.mu.Lock()
+		delete(sc.entries, thinkingID)
+		sc.mu.Unlock()
+		return nil
+	}
+
+	return &entry
+}
+
+// ClearThinkingCache xóa thinking cache cho một session cụ thể hoặc tất cả sessions
+func ClearThinkingCache(sessionID string) {
+	if sessionID != "" {
+		thinkingCache.Delete(sessionID)
+	} else {
+		thinkingCache.Range(func(key, _ any) bool {
+			thinkingCache.Delete(key)
+			return true
+		})
+	}
 }
