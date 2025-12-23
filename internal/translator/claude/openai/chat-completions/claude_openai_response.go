@@ -8,7 +8,7 @@ package chat_completions
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -226,18 +226,11 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				if arguments == "" {
 					arguments = "{}"
 				}
-
-				toolCall := map[string]interface{}{
-					"index": index,
-					"id":    accumulator.ID,
-					"type":  "function",
-					"function": map[string]interface{}{
-						"name":      accumulator.Name,
-						"arguments": arguments,
-					},
-				}
-
-				template, _ = sjson.Set(template, "choices.0.delta.tool_calls", []interface{}{toolCall})
+				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.index", index)
+				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.id", accumulator.ID)
+				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.type", "function")
+				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.function.name", accumulator.Name)
+				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.function.arguments", arguments)
 
 				// Clean up the accumulator for this index
 				delete((*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator, index)
@@ -291,18 +284,13 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			outputTokens := usage.Get("output_tokens").Int()
 			cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
 			cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
-			usageObj := map[string]interface{}{
-				"input_tokens": inputTokens,
-				"prompt_tokens":     inputTokens,
-				"output_tokens": outputTokens,
-				"cache_creation_input_tokens": cacheCreationInputTokens,
-				"cache_read_input_tokens": cacheReadInputTokens,
-			}
-			template, _ = sjson.Set(template, "usage", usageObj)
-			// Log thông tin token usage cho request Claude
-			totalTokens := inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens
-			log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, totalTokens)
 
+			template, _ = sjson.Set(template, "usage.input_tokens", inputTokens)
+			template, _ = sjson.Set(template, "usage.output_tokens", outputTokens)
+			template, _ = sjson.Set(template, "usage.cache_creation_input_tokens", cacheCreationInputTokens)
+			template, _ = sjson.Set(template, "usage.cache_read_input_tokens", cacheReadInputTokens)
+			// template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
+			log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
 		}
 		return []string{template}
 
@@ -317,14 +305,10 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 	case "error":
 		// Error event - format and return error response
 		if errorData := root.Get("error"); errorData.Exists() {
-			errorResponse := map[string]interface{}{
-				"error": map[string]interface{}{
-					"message": errorData.Get("message").String(),
-					"type":    errorData.Get("type").String(),
-				},
-			}
-			errorJSON, _ := json.Marshal(errorResponse)
-			return []string{string(errorJSON)}
+			errorJSON := `{"error":{"message":"","type":""}}`
+			errorJSON, _ = sjson.Set(errorJSON, "error.message", errorData.Get("message").String())
+			errorJSON, _ = sjson.Set(errorJSON, "error.type", errorData.Get("type").String())
+			return []string{errorJSON}
 		}
 		return []string{}
 
@@ -385,15 +369,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	var reasoningTokens int64
 	var stopReason string
 	var contentParts []string
-	// Use map to track tool calls by index for proper merging
-	toolCallsMap := make(map[int]map[string]interface{})
-	// Track tool call arguments accumulation
-	toolCallArgsMap := make(map[int]strings.Builder)
-	// Track thinking blocks by index
-	thinkingMap := make(map[int]map[string]interface{})
-	// Track thinking and signature accumulation
-	thinkingTextMap := make(map[int]strings.Builder)
-	thinkingSignatureMap := make(map[int]strings.Builder)
+	toolCallsAccumulator := make(map[int]*ToolCallAccumulator)
 
 	for _, chunk := range chunks {
 		root := gjson.ParseBytes(chunk)
@@ -415,29 +391,17 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			// Handle different content block types at the beginning
 			if contentBlock := root.Get("content_block"); contentBlock.Exists() {
 				blockType := contentBlock.Get("type").String()
-				index := int(root.Get("index").Int())
+				// index := int(root.Get("index").Int())
 				
 				if blockType == "thinking" {
-					// Initialize thinking block tracking for this index
-					thinkingMap[index] = map[string]interface{}{
-						"type": "reasoning",
-						"text": "",
-					}
-					// Initialize thinking and signature builders
-					thinkingTextMap[index] = strings.Builder{}
-					thinkingSignatureMap[index] = strings.Builder{}
+
 				} else if blockType == "tool_use" {
-					// Initialize tool call tracking for this index
-					toolCallsMap[index] = map[string]interface{}{
-						"id":   contentBlock.Get("id").String(),
-						"type": "function",
-						"function": map[string]interface{}{
-							"name":      contentBlock.Get("name").String(),
-							"arguments": "",
-						},
+					// Initialize tool call accumulator for this index
+					index := int(root.Get("index").Int())
+					toolCallsAccumulator[index] = &ToolCallAccumulator{
+						ID:   contentBlock.Get("id").String(),
+						Name: contentBlock.Get("name").String(),
 					}
-					// Initialize arguments builder for this tool call
-					toolCallArgsMap[index] = strings.Builder{}
 				}
 			}
 
@@ -445,7 +409,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			// Process incremental content updates
 			if delta := root.Get("delta"); delta.Exists() {
 				deltaType := delta.Get("type").String()
-				index := int(root.Get("index").Int())
+				// index := int(root.Get("index").Int())
 				
 				switch deltaType {
 				case "text_delta":
@@ -455,26 +419,26 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 					}
 				case "thinking_delta":
 					// Accumulate reasoning/thinking content
-					if thinking := delta.Get("thinking"); thinking.Exists() {
-						if builder, exists := thinkingTextMap[index]; exists {
-							builder.WriteString(thinking.String())
-							thinkingTextMap[index] = builder
-						}
-					}
+					// if thinking := delta.Get("thinking"); thinking.Exists() {
+					// 	if builder, exists := thinkingTextMap[index]; exists {
+					// 		builder.WriteString(thinking.String())
+					// 		thinkingTextMap[index] = builder
+					// 	}
+					// }
 				case "signature_delta":
 					// Accumulate signature for thinking block
-					if signature := delta.Get("signature"); signature.Exists() {
-						if builder, exists := thinkingSignatureMap[index]; exists {
-							builder.WriteString(signature.String())
-							thinkingSignatureMap[index] = builder
-						}
-					}
+					// if signature := delta.Get("signature"); signature.Exists() {
+					// 	if builder, exists := thinkingSignatureMap[index]; exists {
+					// 		builder.WriteString(signature.String())
+					// 		thinkingSignatureMap[index] = builder
+					// 	}
+					// }
 				case "input_json_delta":
 					// Accumulate tool call arguments
 					if partialJSON := delta.Get("partial_json"); partialJSON.Exists() {
-						if builder, exists := toolCallArgsMap[index]; exists {
-							builder.WriteString(partialJSON.String())
-							toolCallArgsMap[index] = builder
+						index := int(root.Get("index").Int())
+						if accumulator, exists := toolCallsAccumulator[index]; exists {
+							accumulator.Arguments.WriteString(partialJSON.String())
 						}
 					}
 				}
@@ -483,40 +447,10 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 		case "content_block_stop":
 			// Finalize tool call arguments or thinking block for this index when content block ends
 			index := int(root.Get("index").Int())
-			
-			// Finalize tool call if exists
-			if toolCall, exists := toolCallsMap[index]; exists {
-				if builder, argsExists := toolCallArgsMap[index]; argsExists {
-					// Set the accumulated arguments for the tool call
-					arguments := builder.String()
-					if arguments == "" {
-						arguments = "{}"
-					}
-					toolCall["function"].(map[string]interface{})["arguments"] = arguments
+			if accumulator, exists := toolCallsAccumulator[index]; exists {
+				if accumulator.Arguments.Len() == 0 {
+					accumulator.Arguments.WriteString("{}")
 				}
-			}
-			
-			// Finalize thinking block if exists
-			if thinkingBlock, exists := thinkingMap[index]; exists {
-				thinkingText := ""
-				signatureText := ""
-				
-				if builder, textExists := thinkingTextMap[index]; textExists {
-					thinkingText = builder.String()
-				}
-				if builder, sigExists := thinkingSignatureMap[index]; sigExists {
-					signatureText = builder.String()
-				}
-				
-				// Tạo JSON object cho reasoning content
-				reasoningJSON := map[string]interface{}{
-					"thinking":  thinkingText,
-					"signature": signatureText,
-				}
-				reasoningJSONBytes, _ := json.Marshal(reasoningJSON)
-				
-				// Set the JSON string as text
-				thinkingBlock["text"] = string(reasoningJSONBytes)
 			}
 
 		case "message_delta":
@@ -528,14 +462,6 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			}
 			if usage := root.Get("usage"); usage.Exists() {
 				outputTokens = usage.Get("output_tokens").Int()
-				// Estimate reasoning tokens from accumulated thinking content
-				totalThinkingLength := 0
-				for _, builder := range thinkingTextMap {
-					totalThinkingLength += builder.Len()
-				}
-				if totalThinkingLength > 0 {
-					reasoningTokens = int64(totalThinkingLength / 4) // Rough estimation
-				}
 			}
 		}
 	}
@@ -545,62 +471,36 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	out, _ = sjson.Set(out, "created", createdAt)
 	out, _ = sjson.Set(out, "model", model)
 
-	// Build content array with text and thinking blocks
-	var contentArray []interface{}
-	
-	// Tìm max index để biết có bao nhiêu content blocks
-	maxIndex := -1
-	for index := range thinkingMap {
-		if index > maxIndex {
-			maxIndex = index
-		}
-	}
-	
-	// Nếu có thinking blocks, xây dựng content array
-	if len(thinkingMap) > 0 {
-		// Add text content first if exists
-		if len(contentParts) > 0 {
-			textContent := strings.Join(contentParts, "")
-			contentArray = append(contentArray, map[string]interface{}{
-				"type": "text",
-				"text": textContent,
-			})
-		}
-		
-		// Add thinking blocks theo thứ tự index
-		for i := 0; i <= maxIndex; i++ {
-			if thinkingBlock, exists := thinkingMap[i]; exists {
-				contentArray = append(contentArray, thinkingBlock)
-			}
-		}
-		
-		// Set content as array
-		out, _ = sjson.Set(out, "choices.0.message.content", contentArray)
-	} else {
-		// Không có thinking blocks, set content as string như cũ
-		messageContent := strings.Join(contentParts, "")
-		out, _ = sjson.Set(out, "choices.0.message.content", messageContent)
-	}
-
 	// Set tool calls if any were accumulated during processing
-	if len(toolCallsMap) > 0 {
-		// Convert tool calls map to array, preserving order by index
-		var toolCallsArray []interface{}
-		// Find the maximum index to determine the range
+	if len(toolCallsAccumulator) > 0 {
+		toolCallsCount := 0
 		maxIndex := -1
-		for index := range toolCallsMap {
+		for index := range toolCallsAccumulator {
 			if index > maxIndex {
 				maxIndex = index
 			}
 		}
-		// Iterate through all possible indices up to maxIndex
+
 		for i := 0; i <= maxIndex; i++ {
-			if toolCall, exists := toolCallsMap[i]; exists {
-				toolCallsArray = append(toolCallsArray, toolCall)
+			accumulator, exists := toolCallsAccumulator[i]
+			if !exists {
+				continue
 			}
+
+			arguments := accumulator.Arguments.String()
+
+			idPath := fmt.Sprintf("choices.0.message.tool_calls.%d.id", toolCallsCount)
+			typePath := fmt.Sprintf("choices.0.message.tool_calls.%d.type", toolCallsCount)
+			namePath := fmt.Sprintf("choices.0.message.tool_calls.%d.function.name", toolCallsCount)
+			argumentsPath := fmt.Sprintf("choices.0.message.tool_calls.%d.function.arguments", toolCallsCount)
+
+			out, _ = sjson.Set(out, idPath, accumulator.ID)
+			out, _ = sjson.Set(out, typePath, "function")
+			out, _ = sjson.Set(out, namePath, accumulator.Name)
+			out, _ = sjson.Set(out, argumentsPath, arguments)
+			toolCallsCount++
 		}
-		if len(toolCallsArray) > 0 {
-			out, _ = sjson.Set(out, "choices.0.message.tool_calls", toolCallsArray)
+		if toolCallsCount > 0 {
 			out, _ = sjson.Set(out, "choices.0.finish_reason", "tool_calls")
 		} else {
 			out, _ = sjson.Set(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))
