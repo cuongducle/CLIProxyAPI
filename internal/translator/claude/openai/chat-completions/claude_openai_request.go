@@ -283,7 +283,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
 
 	// Base Claude Code API template with default max_tokens value
-	out := fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID)
+	out := fmt.Sprintf(`{"model":"","max_tokens":64000,"messages":[],"metadata":{"user_id":"%s"}}`, userID)
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -327,9 +327,10 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	out, _ = sjson.Set(out, "model", modelName)
 
 	// Max tokens configuration with fallback to default value
-	if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
-		out, _ = sjson.Set(out, "max_tokens", maxTokens.Int())
-	}
+	//disable max_tokens for cursor unlimited mode
+	// if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
+	// 	out, _ = sjson.Set(out, "max_tokens", maxTokens.Int())
+	// }
 
 	// Temperature setting for controlling response randomness
 	// Khi thinking được bật từ request JSON, set temperature = 1
