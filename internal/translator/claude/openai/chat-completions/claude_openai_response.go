@@ -290,28 +290,10 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			inputTokens := usage.Get("input_tokens").Int()
 			outputTokens := usage.Get("output_tokens").Int()
 			cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
-			cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
-			usageObj := map[string]interface{}{
-				"input_tokens": inputTokens,
-				"prompt_tokens":     inputTokens,
-				"output_tokens": outputTokens,
-				"cache_creation_input_tokens": cacheCreationInputTokens,
-				"cache_read_input_tokens": cacheReadInputTokens,
-			}
-			template, _ = sjson.Set(template, "usage", usageObj)
-			// Log thông tin token usage cho request Claude
-			totalTokens := inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens
-			log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, totalTokens)
-
-			// template, _ = sjson.Set(template, "usage.input_tokens", inputTokens)
-			// template, _ = sjson.Set(template, "usage.output_tokens", outputTokens)
-			// template, _ = sjson.Set(template, "usage.cache_creation_input_tokens", cacheCreationInputTokens)
-			// template, _ = sjson.Set(template, "usage.cache_read_input_tokens", cacheReadInputTokens)
-
-			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokens)
-			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokens)
-			template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
-			// template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
+			template, _ = sjson.Set(template, "usage.input_tokens", inputTokens)
+			template, _ = sjson.Set(template, "usage.output_tokens", outputTokens)
+			template, _ = sjson.Set(template, "usage.cache_read_input_tokens", cacheReadInputTokens)
+			template, _ = sjson.Set(template, "usage.cache_creation_input_tokens", cacheCreationInputTokens)
 			log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
 		}
 		return []string{template}
@@ -619,20 +601,20 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 		out, _ = sjson.Set(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))
 	}
 
-	// Set usage information including prompt tokens, completion tokens, and total tokens
-	totalTokens := inputTokens + outputTokens
-	out, _ = sjson.Set(out, "usage.prompt_tokens", inputTokens)
-	out, _ = sjson.Set(out, "usage.completion_tokens", outputTokens)
-	out, _ = sjson.Set(out, "usage.total_tokens", totalTokens)
+	// // Set usage information including prompt tokens, completion tokens, and total tokens
+	// totalTokens := inputTokens + outputTokens
+	// out, _ = sjson.Set(out, "usage.prompt_tokens", inputTokens)
+	// out, _ = sjson.Set(out, "usage.completion_tokens", outputTokens)
+	// out, _ = sjson.Set(out, "usage.total_tokens", totalTokens)
 
 	
-	// Add reasoning tokens to usage details if any reasoning content was processed
-	if reasoningTokens > 0 {
-		out, _ = sjson.Set(out, "usage.completion_tokens_details.reasoning_tokens", reasoningTokens)
-	}
+	// // Add reasoning tokens to usage details if any reasoning content was processed
+	// if reasoningTokens > 0 {
+	// 	out, _ = sjson.Set(out, "usage.completion_tokens_details.reasoning_tokens", reasoningTokens)
+	// }
 
-	// Log thông tin token usage cho request Claude
-	log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, totalTokens: %d, reasoningTokens: %d.", model, inputTokens, outputTokens, totalTokens, reasoningTokens)
+	// // Log thông tin token usage cho request Claude
+	// log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, totalTokens: %d, reasoningTokens: %d.", model, inputTokens, outputTokens, totalTokens, reasoningTokens)
 
 
 	return out
