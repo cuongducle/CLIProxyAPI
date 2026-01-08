@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	ThinkingBudgetMetadataKey          = "thinking_budget"
-	ThinkingIncludeThoughtsMetadataKey = "thinking_include_thoughts"
-	ReasoningEffortMetadataKey         = "reasoning_effort"
-	ThinkingOriginalModelMetadataKey   = "thinking_original_model"
+	ThinkingBudgetMetadataKey            = "thinking_budget"
+	ThinkingIncludeThoughtsMetadataKey   = "thinking_include_thoughts"
+	ReasoningEffortMetadataKey           = "reasoning_effort"
+	ThinkingOriginalModelMetadataKey     = "thinking_original_model"
+	ModelMappingOriginalModelMetadataKey = "model_mapping_original_model"
 )
 
 // modelAliases map các tên model alias sang tên model chuẩn.
@@ -368,6 +369,13 @@ func ResolveOriginalModel(model string, metadata map[string]any) string {
 	}
 
 	if metadata != nil {
+		if v, ok := metadata[ModelMappingOriginalModelMetadataKey]; ok {
+			if s, okStr := v.(string); okStr && strings.TrimSpace(s) != "" {
+				if base := normalize(s); base != "" {
+					return base
+				}
+			}
+		}
 		if v, ok := metadata[ThinkingOriginalModelMetadataKey]; ok {
 			if s, okStr := v.(string); okStr && strings.TrimSpace(s) != "" {
 				if base := normalize(s); base != "" {
