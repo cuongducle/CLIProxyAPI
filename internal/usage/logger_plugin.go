@@ -665,7 +665,7 @@ func StartAutoSave(ctx context.Context, interval time.Duration) {
 	autoSaveMu.Lock()
 	defer autoSaveMu.Unlock()
 
-	filePath := GetStatsFilePath()
+	// filePath := GetStatsFilePath()
 	// log.Infof("auto-save starting: interval=%v, file=%s", interval, filePath)
 
 	// Dừng auto-save cũ nếu đang chạy
@@ -686,7 +686,7 @@ func StartAutoSave(ctx context.Context, interval time.Duration) {
 			case <-ticker.C:
 				stats := defaultRequestStatistics
 				stats.mu.RLock()
-				totalReqs := stats.totalRequests
+				// totalReqs := stats.totalRequests
 				stats.mu.RUnlock()
 				// log.Infof("auto-save tick: saving %d requests to %s", totalReqs, GetStatsFilePath())
 				if err := defaultRequestStatistics.Save(); err != nil {
