@@ -15,7 +15,8 @@ services:
     environment:
       DEPLOY: ${DEPLOY:-}
     ports:
-      - "8317:8317"
+      - "8318:8317"   # Main port (HTTP or HTTPS depending on tls.mode)
+      - "80:8318" # HTTP port for ACME challenges (when using tls.mode: autocert)
       # - "8085:8085"
       # - "1455:1455"
       # - "54545:54545"
@@ -24,5 +25,6 @@ services:
     volumes:
       - ./config.yaml:/CLIProxyAPI/config.yaml
       - ./auths:/root/.cli-proxy-api
+      - ./certs:/CLIProxyAPI/.certs
       - ./logs:/CLIProxyAPI/logs
     restart: unless-stopped

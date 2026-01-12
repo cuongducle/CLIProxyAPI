@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 
 // defaultRoundTripperProvider returns a per-auth HTTP RoundTripper based on
 // the Auth.ProxyURL value. It caches transports per proxy URL string.
+// All transports are configured with HTTP/2 support for optimal streaming performance.
 type defaultRoundTripperProvider struct {
 	mu    sync.RWMutex
 	cache map[string]http.RoundTripper
@@ -25,6 +27,7 @@ func newDefaultRoundTripperProvider() *defaultRoundTripperProvider {
 }
 
 // RoundTripperFor implements coreauth.RoundTripperProvider.
+// Returns an HTTP/2 enabled transport configured for the auth's proxy URL.
 func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.RoundTripper {
 	if auth == nil {
 		return nil
@@ -46,26 +49,35 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 		return nil
 	}
 	var transport *http.Transport
-	// Handle different proxy schemes.
+	// Handle different proxy schemes with HTTP/2 support.
 	if proxyURL.Scheme == "socks5" {
 		// Configure SOCKS5 proxy with optional authentication.
-		username := proxyURL.User.Username()
-		password, _ := proxyURL.User.Password()
-		proxyAuth := &proxy.Auth{User: username, Password: password}
+		var proxyAuth *proxy.Auth
+		if proxyURL.User != nil {
+			username := proxyURL.User.Username()
+			password, _ := proxyURL.User.Password()
+			proxyAuth = &proxy.Auth{User: username, Password: password}
+		}
 		dialer, errSOCKS5 := proxy.SOCKS5("tcp", proxyURL.Host, proxyAuth, proxy.Direct)
 		if errSOCKS5 != nil {
 			log.Errorf("create SOCKS5 dialer failed: %v", errSOCKS5)
 			return nil
 		}
-		// Set up a custom transport using the SOCKS5 dialer.
+		// Set up a custom transport using the SOCKS5 dialer with HTTP/2 support.
 		transport = &http.Transport{
+			ForceAttemptHTTP2: true,
+			TLSClientConfig:   &tls.Config{},
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return dialer.Dial(network, addr)
 			},
 		}
 	} else if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
-		// Configure HTTP or HTTPS proxy.
-		transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+		// Configure HTTP or HTTPS proxy with HTTP/2 support.
+		transport = &http.Transport{
+			ForceAttemptHTTP2: true,
+			TLSClientConfig:   &tls.Config{},
+			Proxy:             http.ProxyURL(proxyURL),
+		}
 	} else {
 		log.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
 		return nil

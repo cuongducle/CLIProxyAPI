@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -688,7 +689,9 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 			return nil
 		}
 		return &http.Transport{
-			Proxy: nil,
+			ForceAttemptHTTP2: true,
+			TLSClientConfig:   &tls.Config{},
+			Proxy:             nil,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return dialer.Dial(network, addr)
 			},
@@ -696,7 +699,11 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 	}
 
 	if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
-		return &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+		return &http.Transport{
+			ForceAttemptHTTP2: true,
+			TLSClientConfig:   &tls.Config{},
+			Proxy:             http.ProxyURL(proxyURL),
+		}
 	}
 
 	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
