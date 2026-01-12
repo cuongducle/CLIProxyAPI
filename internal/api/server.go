@@ -37,7 +37,6 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"gopkg.in/yaml.v3"
@@ -789,7 +788,6 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 // It's a blocking call and will only return on an unrecoverable error.
 //
 // Supports multiple TLS modes:
-//   - "autocert": Automatic Let's Encrypt certificates with HTTP/2
 //   - "manual": Manual TLS certificates with HTTP/2
 //   - "h2c": HTTP/2 cleartext (no TLS, for use behind reverse proxy)
 //   - "" (empty): HTTP/1.1 only (legacy behavior)
@@ -810,8 +808,6 @@ func (s *Server) Start() error {
 	useLegacyTLS := s.cfg != nil && s.cfg.TLS.Enable && tlsMode == ""
 
 	switch tlsMode {
-	case "autocert":
-		return s.startWithAutocert()
 	case "manual":
 		return s.startWithManualTLS()
 	case "h2c":
@@ -822,81 +818,6 @@ func (s *Server) Start() error {
 		}
 		return s.startHTTP()
 	}
-}
-
-// startWithAutocert starts the server with Let's Encrypt automatic certificates.
-// This enables HTTP/2 automatically and handles certificate renewal.
-// Uses cfg.Port as HTTPS port, and tls.http-port for ACME challenges (default: 80).
-func (s *Server) startWithAutocert() error {
-	if s.cfg == nil {
-		return fmt.Errorf("failed to start autocert server: config is nil")
-	}
-
-	domains := s.cfg.TLS.Domains
-	if len(domains) == 0 {
-		return fmt.Errorf("failed to start autocert server: no domains specified in tls.domains")
-	}
-
-	cacheDir := strings.TrimSpace(s.cfg.TLS.CacheDir)
-	if cacheDir == "" {
-		cacheDir = ".certs"
-	}
-
-	// Ensure cache directory exists
-	if err := os.MkdirAll(cacheDir, 0700); err != nil {
-		return fmt.Errorf("failed to create autocert cache directory: %v", err)
-	}
-
-	// Use cfg.Port as HTTPS port (consistent with other modes)
-	httpsPort := s.cfg.Port
-	if httpsPort == 0 {
-		httpsPort = 443
-	}
-
-	// Get HTTP port for ACME challenges (default: 80)
-	httpPort := s.cfg.TLS.HTTPPort
-	if httpPort == 0 {
-		httpPort = 80
-	}
-
-	m := &autocert.Manager{
-		Cache:      autocert.DirCache(cacheDir),
-		Prompt:     autocert.AcceptTOS,
-		HostPolicy: autocert.HostWhitelist(domains...),
-	}
-
-	// Set email if provided
-	if email := strings.TrimSpace(s.cfg.TLS.ACMEEmail); email != "" {
-		m.Email = email
-	}
-
-	// Configure TLS for HTTP/2
-	tlsConfig := m.TLSConfig()
-	tlsConfig.NextProtos = []string{"h2", "http/1.1", "acme-tls/1"}
-
-	s.server.TLSConfig = tlsConfig
-	// s.server.Addr is already set from NewServer using cfg.Host:cfg.Port
-
-	// Start HTTP server for ACME challenges and redirect
-	go func() {
-		httpAddr := fmt.Sprintf("%s:%d", s.cfg.Host, httpPort)
-		httpServer := &http.Server{
-			Addr:    httpAddr,
-			Handler: m.HTTPHandler(http.HandlerFunc(s.httpToHTTPSRedirectWithPort(httpsPort))),
-		}
-		log.Infof("Starting HTTP server on %s for ACME challenges and HTTPS redirect", httpAddr)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Errorf("HTTP redirect server error: %v", err)
-		}
-	}()
-
-	log.Infof("Starting HTTPS server with Let's Encrypt autocert on %s for domains: %v", s.server.Addr, domains)
-	log.Info("HTTP/2 enabled automatically with TLS")
-
-	if err := s.server.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("failed to start autocert HTTPS server: %v", err)
-	}
-	return nil
 }
 
 // startWithManualTLS starts the server with manually provided TLS certificates.
@@ -942,25 +863,6 @@ func (s *Server) startHTTP() error {
 		return fmt.Errorf("failed to start HTTP server: %v", err)
 	}
 	return nil
-}
-
-// httpToHTTPSRedirectWithPort returns a redirect handler that redirects to HTTPS on the specified port.
-func (s *Server) httpToHTTPSRedirectWithPort(httpsPort int) func(http.ResponseWriter, *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		host := r.Host
-		// Remove port from host if present
-		if colonIdx := strings.LastIndex(host, ":"); colonIdx != -1 {
-			host = host[:colonIdx]
-		}
-		// Build target URL with custom HTTPS port
-		var target string
-		if httpsPort == 443 {
-			target = "https://" + host + r.URL.RequestURI()
-		} else {
-			target = fmt.Sprintf("https://%s:%d%s", host, httpsPort, r.URL.RequestURI())
-		}
-		http.Redirect(w, r, target, http.StatusMovedPermanently)
-	}
 }
 
 // Stop gracefully shuts down the API server without interrupting any

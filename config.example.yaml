@@ -13,23 +13,13 @@ tls:
 
 # TLS Mode Examples:
 #
-# Option 1: Let's Encrypt autocert (recommended for production)
-# Uses "port" config above as HTTPS port (e.g., port: 8317 means HTTPS on 8317)
-# tls:
-#   mode: autocert
-#   domains:
-#     - api.example.com
-#   cache-dir: .certs
-#   acme-email: admin@example.com
-#   http-port: 8318   # HTTP port for ACME challenges (default: 80)
-#
-# Option 2: Manual TLS certificates
+# Option 1: Manual TLS certificates
 # tls:
 #   mode: manual
 #   cert: /path/to/cert.pem
 #   key: /path/to/key.pem
 #
-# Option 3: h2c mode (HTTP/2 cleartext, for use behind reverse proxy)
+# Option 2: h2c mode (HTTP/2 cleartext, for use behind reverse proxy)
 # tls:
 #   mode: h2c
 

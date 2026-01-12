@@ -113,8 +113,7 @@ type Config struct {
 type TLSConfig struct {
 	// Enable toggles HTTPS server mode (legacy, use Mode instead).
 	Enable bool `yaml:"enable" json:"enable"`
-	// Mode specifies the TLS/HTTP2 mode: "autocert", "manual", "h2c", or "" (disabled).
-	// - "autocert": Use Let's Encrypt automatic certificates (requires public domain)
+	// Mode specifies the TLS/HTTP2 mode: "manual", "h2c", or "" (disabled).
 	// - "manual": Use manually provided cert/key files
 	// - "h2c": HTTP/2 cleartext (no TLS, for use behind reverse proxy)
 	// - "" or unset: HTTP/1.1 only (legacy behavior when Enable=false)
@@ -123,15 +122,6 @@ type TLSConfig struct {
 	Cert string `yaml:"cert" json:"cert"`
 	// Key is the path to the TLS private key file (used when Mode="manual" or Enable=true).
 	Key string `yaml:"key" json:"key"`
-	// Domains specifies the domain names for Let's Encrypt autocert (used when Mode="autocert").
-	Domains []string `yaml:"domains" json:"domains"`
-	// CacheDir specifies the directory to cache Let's Encrypt certificates (default: ".certs").
-	CacheDir string `yaml:"cache-dir" json:"cache-dir"`
-	// ACMEEmail is the optional email address for Let's Encrypt account registration.
-	ACMEEmail string `yaml:"acme-email" json:"acme-email"`
-	// HTTPPort specifies the port for HTTP server (ACME challenges and redirect). Default: 80.
-	// The HTTPS port uses the main "port" config field for consistency across all modes.
-	HTTPPort int `yaml:"http-port" json:"http-port"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
