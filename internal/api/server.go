@@ -851,6 +851,20 @@ func (s *Server) startWithManualTLS() error {
 		MinVersion: tls.VersionTLS12,
 	}
 
+	// Cấu hình HTTP/2 server với các tham số tối ưu cho streaming
+	// Điều này cần thiết để HTTP/2 hoạt động đúng với các client như Cursor
+	h2s := &http2.Server{
+		// MaxConcurrentStreams giới hạn số stream đồng thời trên một connection
+		MaxConcurrentStreams: 250,
+		// MaxReadFrameSize là kích thước frame tối đa server sẽ đọc
+		MaxReadFrameSize: 1 << 20, // 1MB
+		// IdleTimeout là thời gian connection có thể idle trước khi bị đóng
+		IdleTimeout: 120 * time.Second,
+	}
+	if err := http2.ConfigureServer(s.server, h2s); err != nil {
+		return fmt.Errorf("failed to configure HTTP/2: %v", err)
+	}
+
 	log.Debugf("Starting API server on %s with manual TLS (HTTP/2 enabled)", s.server.Addr)
 	if err := s.server.ListenAndServeTLS(cert, key); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("failed to start HTTPS server: %v", err)
