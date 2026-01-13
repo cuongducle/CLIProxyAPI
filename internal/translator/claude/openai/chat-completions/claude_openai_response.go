@@ -526,41 +526,9 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	out, _ = sjson.Set(out, "created", createdAt)
 	out, _ = sjson.Set(out, "model", model)
 
-	// Build content array with text and thinking blocks
-	var contentArray []interface{}
-	
-	// Tìm max index để biết có bao nhiêu content blocks
-	maxIndex := -1
-	for index := range thinkingMap {
-		if index > maxIndex {
-			maxIndex = index
-		}
-	}
-	
-	// Nếu có thinking blocks, xây dựng content array
-	if len(thinkingMap) > 0 {
-		// Add text content first if exists
-		if len(contentParts) > 0 {
-			textContent := strings.Join(contentParts, "")
-			contentArray = append(contentArray, map[string]interface{}{
-				"type": "text",
-				"text": textContent,
-			})
-		}
-		
-		// Add thinking blocks theo thứ tự index
-		for i := 0; i <= maxIndex; i++ {
-			if thinkingBlock, exists := thinkingMap[i]; exists {
-				contentArray = append(contentArray, thinkingBlock)
-			}
-		}
-		
-		// Set content as array
-		out, _ = sjson.Set(out, "choices.0.message.content", contentArray)
-	} else {
-		// Không có thinking blocks, set content as string như cũ
-		messageContent := strings.Join(contentParts, "")
-		out, _ = sjson.Set(out, "choices.0.message.content", messageContent)
+	// Set accumulated content
+	if len(contentParts) > 0 {
+		out, _ = sjson.Set(out, "choices.0.message.content", strings.Join(contentParts, ""))
 	}
 
 	// Set tool calls if any were accumulated during processing
