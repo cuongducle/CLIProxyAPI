@@ -439,6 +439,18 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 									msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
 								}
 							}
+
+						case "image":
+							// Hỗ trợ nhận ảnh base64 trực tiếp theo format Claude native
+							// Request format: {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
+							source := part.Get("source")
+							if source.Exists() && source.Get("type").String() == "base64" {
+								imagePart := `{"type":"image","source":{"type":"base64","media_type":"","data":""}}`
+								imagePart, _ = sjson.Set(imagePart, "source.media_type", source.Get("media_type").String())
+								imagePart, _ = sjson.Set(imagePart, "source.data", source.Get("data").String())
+								msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
+							}
+
 						case "tool_use":
 							// Handle tool use messages conversion
 							toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
