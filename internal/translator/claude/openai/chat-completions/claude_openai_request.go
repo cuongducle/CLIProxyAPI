@@ -435,7 +435,28 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 									msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
 								}
 							}
-						case "tool_use": 
+
+						case "image":
+							// Hỗ trợ nhận ảnh base64 trực tiếp theo format Claude native
+							// Request format: {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
+							source := part.Get("source")
+							if source.Exists() && source.Get("type").String() == "base64" {
+								imagePart := `{"type":"image","source":{"type":"base64","media_type":"","data":""}}`
+								imagePart, _ = sjson.Set(imagePart, "source.media_type", source.Get("media_type").String())
+								imagePart, _ = sjson.Set(imagePart, "source.data", source.Get("data").String())
+								msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
+							}
+
+						case "tool_use":
+							// Handle tool use messages conversion
+							toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
+							toolUse, _ = sjson.Set(toolUse, "id", part.Get("id").String())
+							toolUse, _ = sjson.Set(toolUse, "name", part.Get("name").String())
+							toolUse, _ = sjson.SetRaw(toolUse, "input", part.Get("input").Raw)
+
+							msg, _ = sjson.SetRaw(msg, "content.-1", toolUse)
+
+						case "tool_result":
 							// Handle tool result messages conversion
 							toolCallID := part.Get("id").String()
 							name := part.Get("name").String()
