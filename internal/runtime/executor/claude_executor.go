@@ -173,6 +173,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
+	captureClaudeRateLimit(httpResp.Header, reporter.source, baseModel)
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
@@ -318,6 +319,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		recordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
+	captureClaudeRateLimit(httpResp.Header, reporter.source, baseModel)
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
