@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,27 +35,70 @@ func GetRateLimitFilePath() string {
 }
 
 // RateLimitRecord lưu 1 snapshot rate limit từ Claude API response headers.
+// Hỗ trợ 2 format:
+//   - Unified (OAuth/subscription): Anthropic-Ratelimit-Unified-5h-*, Anthropic-Ratelimit-Unified-7d-*
+//   - Standard (API key): anthropic-ratelimit-requests-*, anthropic-ratelimit-tokens-*
 type RateLimitRecord struct {
-	Timestamp             time.Time `json:"timestamp"`
-	Source                string    `json:"source"`                            // auth email/key identifier
-	Model                 string    `json:"model"`                             // model name
-	RequestsLimit         int64     `json:"requests_limit,omitempty"`          // anthropic-ratelimit-requests-limit
-	RequestsRemaining     int64     `json:"requests_remaining,omitempty"`      // anthropic-ratelimit-requests-remaining
-	RequestsReset         time.Time `json:"requests_reset,omitempty"`          // anthropic-ratelimit-requests-reset
-	TokensLimit           int64     `json:"tokens_limit,omitempty"`            // anthropic-ratelimit-tokens-limit
-	TokensRemaining       int64     `json:"tokens_remaining,omitempty"`        // anthropic-ratelimit-tokens-remaining
-	TokensReset           time.Time `json:"tokens_reset,omitempty"`            // anthropic-ratelimit-tokens-reset
-	InputTokensLimit      int64     `json:"input_tokens_limit,omitempty"`      // anthropic-ratelimit-input-tokens-limit
-	InputTokensRemaining  int64     `json:"input_tokens_remaining,omitempty"`  // anthropic-ratelimit-input-tokens-remaining
-	InputTokensReset      time.Time `json:"input_tokens_reset,omitempty"`      // anthropic-ratelimit-input-tokens-reset
-	OutputTokensLimit     int64     `json:"output_tokens_limit,omitempty"`     // anthropic-ratelimit-output-tokens-limit
-	OutputTokensRemaining int64     `json:"output_tokens_remaining,omitempty"` // anthropic-ratelimit-output-tokens-remaining
-	OutputTokensReset     time.Time `json:"output_tokens_reset,omitempty"`     // anthropic-ratelimit-output-tokens-reset
+	Timestamp time.Time `json:"timestamp"`
+	Source    string    `json:"source"` // auth email/key identifier
+	Model     string    `json:"model"`
+	Type      string    `json:"type"` // "unified" hoặc "standard"
+
+	// === Unified fields (OAuth/subscription) ===
+	// 5-hour window
+	Utilization5h float64   `json:"utilization_5h,omitempty"` // % đã dùng (0.0 - 1.0)
+	Status5h      string    `json:"status_5h,omitempty"`      // "allowed" / "rejected"
+	Reset5h       time.Time `json:"reset_5h,omitempty"`       // thời điểm reset
+
+	// 7-day window
+	Utilization7d float64   `json:"utilization_7d,omitempty"`
+	Status7d      string    `json:"status_7d,omitempty"`
+	Reset7d       time.Time `json:"reset_7d,omitempty"`
+
+	// Unified overall
+	UnifiedStatus         string    `json:"unified_status,omitempty"` // "allowed" / "rejected"
+	UnifiedReset          time.Time `json:"unified_reset,omitempty"`
+	RepresentativeClaim   string    `json:"representative_claim,omitempty"`    // "five_hour" / "seven_day"
+	FallbackPercentage    float64   `json:"fallback_percentage,omitempty"`     // 0.5 = 50%
+	OverageStatus         string    `json:"overage_status,omitempty"`          // "rejected" / "allowed"
+	OverageDisabledReason string    `json:"overage_disabled_reason,omitempty"` // "org_level_disabled"
+	OrganizationID        string    `json:"organization_id,omitempty"`
+
+	// === Standard fields (API key) ===
+	RequestsLimit         int64     `json:"requests_limit,omitempty"`
+	RequestsRemaining     int64     `json:"requests_remaining,omitempty"`
+	RequestsReset         time.Time `json:"requests_reset,omitempty"`
+	TokensLimit           int64     `json:"tokens_limit,omitempty"`
+	TokensRemaining       int64     `json:"tokens_remaining,omitempty"`
+	TokensReset           time.Time `json:"tokens_reset,omitempty"`
+	InputTokensLimit      int64     `json:"input_tokens_limit,omitempty"`
+	InputTokensRemaining  int64     `json:"input_tokens_remaining,omitempty"`
+	InputTokensReset      time.Time `json:"input_tokens_reset,omitempty"`
+	OutputTokensLimit     int64     `json:"output_tokens_limit,omitempty"`
+	OutputTokensRemaining int64     `json:"output_tokens_remaining,omitempty"`
+	OutputTokensReset     time.Time `json:"output_tokens_reset,omitempty"`
 }
 
 // IsEmpty kiểm tra xem record có chứa dữ liệu rate limit hợp lệ không.
 func (r RateLimitRecord) IsEmpty() bool {
+	if r.Type == "unified" {
+		return r.Status5h == "" && r.Status7d == "" && r.UnifiedStatus == ""
+	}
 	return r.RequestsLimit == 0 && r.TokensLimit == 0 && r.InputTokensLimit == 0 && r.OutputTokensLimit == 0
+}
+
+// UnifiedSummary chứa aggregated usage cho unified rate limit (OAuth).
+type UnifiedSummary struct {
+	TotalRequests int64            `json:"total_requests"`
+	LatestRecord  *RateLimitRecord `json:"latest_record,omitempty"` // record mới nhất
+	// Giá trị từ record mới nhất (tiện cho client đọc nhanh)
+	Utilization5h float64 `json:"utilization_5h"`      // % đã dùng 5h window
+	Status5h      string  `json:"status_5h,omitempty"` // "allowed" / "rejected"
+	Reset5h       string  `json:"reset_5h,omitempty"`  // RFC3339
+	Utilization7d float64 `json:"utilization_7d"`      // % đã dùng 7d window
+	Status7d      string  `json:"status_7d,omitempty"` // "allowed" / "rejected"
+	Reset7d       string  `json:"reset_7d,omitempty"`  // RFC3339
+	OverageStatus string  `json:"overage_status,omitempty"`
 }
 
 // SourceUsage chứa usage summary cho 1 source (auth email/key).
@@ -66,7 +110,8 @@ type SourceUsage struct {
 // WindowSummary chứa aggregated usage cho 1 time window.
 type WindowSummary struct {
 	TotalRequests int64                  `json:"total_requests"`
-	LatestLimit   *RateLimitRecord       `json:"latest_limit,omitempty"`
+	Unified       *UnifiedSummary        `json:"unified,omitempty"`      // Unified rate limit data (OAuth)
+	LatestLimit   *RateLimitRecord       `json:"latest_limit,omitempty"` // Standard rate limit (API key)
 	BySource      map[string]SourceUsage `json:"by_source,omitempty"`
 }
 
@@ -128,6 +173,20 @@ func (s *RateLimitStore) cleanupLocked() {
 	s.records = s.records[:n]
 }
 
+// Latest trả về record mới nhất (nil nếu chưa có).
+func (s *RateLimitStore) Latest() *RateLimitRecord {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.records) == 0 {
+		return nil
+	}
+	r := s.records[len(s.records)-1]
+	return &r
+}
+
 // QueryByWindow trả về aggregated summary cho records trong time window.
 func (s *RateLimitStore) QueryByWindow(d time.Duration) WindowSummary {
 	summary := WindowSummary{
@@ -143,6 +202,8 @@ func (s *RateLimitStore) QueryByWindow(d time.Duration) WindowSummary {
 	defer s.mu.RUnlock()
 
 	var latestTime time.Time
+	var latestRecord *RateLimitRecord
+
 	for i := range s.records {
 		r := &s.records[i]
 		if r.Timestamp.Before(cutoff) {
@@ -154,7 +215,7 @@ func (s *RateLimitStore) QueryByWindow(d time.Duration) WindowSummary {
 		if r.Timestamp.After(latestTime) {
 			latestTime = r.Timestamp
 			rCopy := *r
-			summary.LatestLimit = &rCopy
+			latestRecord = &rCopy
 		}
 
 		// Track per-source
@@ -169,6 +230,28 @@ func (s *RateLimitStore) QueryByWindow(d time.Duration) WindowSummary {
 			su.LatestLimit = &rCopy
 		}
 		summary.BySource[source] = su
+	}
+
+	if latestRecord != nil {
+		if latestRecord.Type == "unified" {
+			summary.Unified = &UnifiedSummary{
+				TotalRequests: summary.TotalRequests,
+				LatestRecord:  latestRecord,
+				Utilization5h: latestRecord.Utilization5h,
+				Status5h:      latestRecord.Status5h,
+				Utilization7d: latestRecord.Utilization7d,
+				Status7d:      latestRecord.Status7d,
+				OverageStatus: latestRecord.OverageStatus,
+			}
+			if !latestRecord.Reset5h.IsZero() {
+				summary.Unified.Reset5h = latestRecord.Reset5h.Format(time.RFC3339)
+			}
+			if !latestRecord.Reset7d.IsZero() {
+				summary.Unified.Reset7d = latestRecord.Reset7d.Format(time.RFC3339)
+			}
+		} else {
+			summary.LatestLimit = latestRecord
+		}
 	}
 
 	return summary
@@ -306,26 +389,109 @@ func StopRateLimitAutoSave() {
 }
 
 // ParseRateLimitHeaders parse rate limit headers từ HTTP response của Claude API.
-// Trả về RateLimitRecord với các giá trị đã parse.
+// Hỗ trợ 2 format: Unified (OAuth) và Standard (API key).
 func ParseRateLimitHeaders(headers http.Header) RateLimitRecord {
 	r := RateLimitRecord{
 		Timestamp: time.Now(),
 	}
 
-	r.RequestsLimit = parseIntHeader(headers, "anthropic-ratelimit-requests-limit")
-	r.RequestsRemaining = parseIntHeader(headers, "anthropic-ratelimit-requests-remaining")
-	r.RequestsReset = parseTimeHeader(headers, "anthropic-ratelimit-requests-reset")
-	r.TokensLimit = parseIntHeader(headers, "anthropic-ratelimit-tokens-limit")
-	r.TokensRemaining = parseIntHeader(headers, "anthropic-ratelimit-tokens-remaining")
-	r.TokensReset = parseTimeHeader(headers, "anthropic-ratelimit-tokens-reset")
-	r.InputTokensLimit = parseIntHeader(headers, "anthropic-ratelimit-input-tokens-limit")
-	r.InputTokensRemaining = parseIntHeader(headers, "anthropic-ratelimit-input-tokens-remaining")
-	r.InputTokensReset = parseTimeHeader(headers, "anthropic-ratelimit-input-tokens-reset")
-	r.OutputTokensLimit = parseIntHeader(headers, "anthropic-ratelimit-output-tokens-limit")
-	r.OutputTokensRemaining = parseIntHeader(headers, "anthropic-ratelimit-output-tokens-remaining")
-	r.OutputTokensReset = parseTimeHeader(headers, "anthropic-ratelimit-output-tokens-reset")
+	// Thử parse Unified format trước (OAuth/subscription)
+	if parseUnifiedHeaders(headers, &r) {
+		r.Type = "unified"
+		return r
+	}
+
+	// Fallback: parse Standard format (API key)
+	parseStandardHeaders(headers, &r)
+	if !r.IsEmpty() {
+		r.Type = "standard"
+	}
 
 	return r
+}
+
+// parseUnifiedHeaders parse Anthropic-Ratelimit-Unified-* headers.
+// Trả về true nếu tìm thấy ít nhất 1 unified header.
+func parseUnifiedHeaders(headers http.Header, r *RateLimitRecord) bool {
+	found := false
+
+	// Organization ID
+	if v := headers.Get("Anthropic-Organization-Id"); v != "" {
+		r.OrganizationID = v
+		found = true
+	}
+
+	// 5-hour window
+	if v := headers.Get("Anthropic-Ratelimit-Unified-5h-Utilization"); v != "" {
+		r.Utilization5h = parseFloatHeader(v)
+		found = true
+	}
+	if v := headers.Get("Anthropic-Ratelimit-Unified-5h-Status"); v != "" {
+		r.Status5h = strings.ToLower(strings.TrimSpace(v))
+		found = true
+	}
+	if v := headers.Get("Anthropic-Ratelimit-Unified-5h-Reset"); v != "" {
+		r.Reset5h = parseUnixTimestamp(v)
+		found = true
+	}
+
+	// 7-day window
+	if v := headers.Get("Anthropic-Ratelimit-Unified-7d-Utilization"); v != "" {
+		r.Utilization7d = parseFloatHeader(v)
+		found = true
+	}
+	if v := headers.Get("Anthropic-Ratelimit-Unified-7d-Status"); v != "" {
+		r.Status7d = strings.ToLower(strings.TrimSpace(v))
+		found = true
+	}
+	if v := headers.Get("Anthropic-Ratelimit-Unified-7d-Reset"); v != "" {
+		r.Reset7d = parseUnixTimestamp(v)
+		found = true
+	}
+
+	// Unified overall
+	if v := headers.Get("Anthropic-Ratelimit-Unified-Status"); v != "" {
+		r.UnifiedStatus = strings.ToLower(strings.TrimSpace(v))
+		found = true
+	}
+	if v := headers.Get("Anthropic-Ratelimit-Unified-Reset"); v != "" {
+		r.UnifiedReset = parseUnixTimestamp(v)
+		found = true
+	}
+	if v := headers.Get("Anthropic-Ratelimit-Unified-Representative-Claim"); v != "" {
+		r.RepresentativeClaim = strings.TrimSpace(v)
+		found = true
+	}
+	if v := headers.Get("Anthropic-Ratelimit-Unified-Fallback-Percentage"); v != "" {
+		r.FallbackPercentage = parseFloatHeader(v)
+		found = true
+	}
+	if v := headers.Get("Anthropic-Ratelimit-Unified-Overage-Status"); v != "" {
+		r.OverageStatus = strings.ToLower(strings.TrimSpace(v))
+		found = true
+	}
+	if v := headers.Get("Anthropic-Ratelimit-Unified-Overage-Disabled-Reason"); v != "" {
+		r.OverageDisabledReason = strings.TrimSpace(v)
+		found = true
+	}
+
+	return found
+}
+
+// parseStandardHeaders parse anthropic-ratelimit-* headers (API key format).
+func parseStandardHeaders(headers http.Header, r *RateLimitRecord) {
+	r.RequestsLimit = parseIntHeader(headers, "anthropic-ratelimit-requests-limit")
+	r.RequestsRemaining = parseIntHeader(headers, "anthropic-ratelimit-requests-remaining")
+	r.RequestsReset = parseRFC3339Header(headers, "anthropic-ratelimit-requests-reset")
+	r.TokensLimit = parseIntHeader(headers, "anthropic-ratelimit-tokens-limit")
+	r.TokensRemaining = parseIntHeader(headers, "anthropic-ratelimit-tokens-remaining")
+	r.TokensReset = parseRFC3339Header(headers, "anthropic-ratelimit-tokens-reset")
+	r.InputTokensLimit = parseIntHeader(headers, "anthropic-ratelimit-input-tokens-limit")
+	r.InputTokensRemaining = parseIntHeader(headers, "anthropic-ratelimit-input-tokens-remaining")
+	r.InputTokensReset = parseRFC3339Header(headers, "anthropic-ratelimit-input-tokens-reset")
+	r.OutputTokensLimit = parseIntHeader(headers, "anthropic-ratelimit-output-tokens-limit")
+	r.OutputTokensRemaining = parseIntHeader(headers, "anthropic-ratelimit-output-tokens-remaining")
+	r.OutputTokensReset = parseRFC3339Header(headers, "anthropic-ratelimit-output-tokens-reset")
 }
 
 func parseIntHeader(headers http.Header, name string) int64 {
@@ -340,7 +506,19 @@ func parseIntHeader(headers http.Header, name string) int64 {
 	return n
 }
 
-func parseTimeHeader(headers http.Header, name string) time.Time {
+func parseFloatHeader(v string) float64 {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0
+	}
+	return f
+}
+
+func parseRFC3339Header(headers http.Header, name string) time.Time {
 	v := headers.Get(name)
 	if v == "" {
 		return time.Time{}
@@ -350,4 +528,25 @@ func parseTimeHeader(headers http.Header, name string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+// parseUnixTimestamp parse Unix timestamp (seconds) thành time.Time.
+func parseUnixTimestamp(v string) time.Time {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}
+	}
+	// Thử parse float trước (có thể có decimal)
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		// Fallback: thử parse RFC3339
+		t, errRFC := time.Parse(time.RFC3339, v)
+		if errRFC != nil {
+			return time.Time{}
+		}
+		return t
+	}
+	sec := int64(f)
+	nsec := int64((f - float64(sec)) * 1e9)
+	return time.Unix(sec, nsec)
 }
