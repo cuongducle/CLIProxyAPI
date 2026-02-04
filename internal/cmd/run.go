@@ -37,9 +37,17 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 		log.Warnf("failed to load statistics: %v", err)
 	}
 
+	// Setup rate limit statistics persistence
+	rateLimitPath := filepath.Join(filepath.Dir(configPath), "logs", "ratelimit_statistics.json")
+	usage.SetRateLimitFilePath(rateLimitPath)
+	if err := usage.GetRateLimitStore().Load(); err != nil {
+		log.Warnf("failed to load ratelimit statistics: %v", err)
+	}
+
 	// Start auto-save mỗi 1 phút
 	autoSaveCtx, autoSaveCancel := context.WithCancel(context.Background())
 	usage.StartAutoSave(autoSaveCtx, 1*time.Minute)
+	usage.StartRateLimitAutoSave(autoSaveCtx, 1*time.Minute)
 
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
@@ -64,6 +72,7 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 		log.Errorf("failed to build proxy service: %v", err)
 		autoSaveCancel()
 		usage.StopAutoSave()
+		usage.StopRateLimitAutoSave()
 		return
 	}
 
@@ -75,6 +84,7 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	// Cleanup: dừng auto-save và save lần cuối
 	autoSaveCancel()
 	usage.StopAutoSave()
+	usage.StopRateLimitAutoSave()
 }
 
 // WaitForCloudDeploy waits indefinitely for shutdown signals in cloud deploy mode
