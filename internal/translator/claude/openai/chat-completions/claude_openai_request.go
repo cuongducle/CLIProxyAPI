@@ -6,7 +6,6 @@
 package chat_completions
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -270,7 +269,7 @@ func extractThinkingFromContent(text string) []interface{} {
 // Returns:
 //   - []byte: The transformed request data in Claude Code API format
 func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 
 	if account == "" {
 		u, _ := uuid.NewRandom()
