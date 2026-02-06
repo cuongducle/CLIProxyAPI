@@ -61,7 +61,10 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	switch capability {
 	case CapabilityBudgetOnly:
 		if config.Mode == ModeLevel {
-			if config.Level == LevelAuto {
+			if config.Level == LevelAuto || config.Level == LevelMax {
+				// LevelAuto and LevelMax are handled below as ModeAuto conversions.
+				// Skip budget conversion to avoid losing the semantic meaning
+				// (LevelMax → ModeAuto + effort=max for DynamicAllowed models like Opus 4.6).
 				break
 			}
 			budget, ok := ConvertLevelToBudget(string(config.Level))
@@ -97,6 +100,17 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		config.Mode = ModeAuto
 		config.Budget = -1
 		config.Level = ""
+	}
+	// LevelMax → ModeAuto + giữ Level=max để applier biết cần set effort=max
+	// Opus 4.6: thinking.type=adaptive + output_config.effort=max
+	if config.Mode == ModeLevel && config.Level == LevelMax {
+		config.Mode = ModeAuto
+		config.Budget = -1
+		// Giữ Level = LevelMax (không clear) để Claude applier set output_config.effort=max
+	}
+	// ModeBudget with Budget=-1 is semantically ModeAuto (e.g., from ConvertLevelToBudget("max"))
+	if config.Mode == ModeBudget && config.Budget == -1 {
+		config.Mode = ModeAuto
 	}
 	if config.Mode == ModeBudget && config.Budget == 0 {
 		config.Mode = ModeNone
@@ -201,7 +215,7 @@ func convertAutoToMidRange(config ThinkingConfig, support *registry.ThinkingSupp
 }
 
 // standardLevelOrder defines the canonical ordering of thinking levels from lowest to highest.
-var standardLevelOrder = []ThinkingLevel{LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh}
+var standardLevelOrder = []ThinkingLevel{LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh, LevelMax}
 
 // clampLevel clamps the given level to the nearest supported level.
 // On tie, prefers the lower level.
