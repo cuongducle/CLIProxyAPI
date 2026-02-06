@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -47,8 +48,14 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
 
-	// Base Claude message payload
-	out := fmt.Sprintf(`{"model":"","max_tokens":64000,"messages":[],"metadata":{"user_id":"%s"}}`, userID)
+	// Lấy max_tokens từ model registry, fallback 64000 nếu không tìm thấy
+	defaultMaxTokens := 64000
+	if modelInfo := registry.LookupModelInfo(modelName, "claude"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+		defaultMaxTokens = modelInfo.MaxCompletionTokens
+	}
+
+	// Base Claude message payload with model-specific max_tokens
+	out := fmt.Sprintf(`{"model":"","max_tokens":%d,"messages":[],"metadata":{"user_id":"%s"}}`, defaultMaxTokens, userID)
 
 	root := gjson.ParseBytes(rawJSON)
 

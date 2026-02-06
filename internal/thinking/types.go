@@ -54,6 +54,9 @@ const (
 	LevelHigh ThinkingLevel = "high"
 	// LevelXHigh sets extra-high thinking effort
 	LevelXHigh ThinkingLevel = "xhigh"
+	// LevelMax sets maximum thinking effort (Opus 4.6+ only)
+	// Khi kết hợp với adaptive thinking, đây là chế độ mạnh nhất
+	LevelMax ThinkingLevel = "max"
 )
 
 // ThinkingConfig represents a unified thinking configuration.

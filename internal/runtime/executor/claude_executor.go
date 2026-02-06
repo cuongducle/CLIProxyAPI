@@ -558,12 +558,21 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 // ensureMaxTokensForThinking ensures max_tokens > thinking.budget_tokens when thinking is enabled.
 // Claude API requires max_tokens to be greater than budget_tokens for extended thinking.
 // If max_tokens is not set or too low, it adjusts to budget_tokens + default output allowance.
+//
+// Với adaptive thinking (Opus 4.6+), không có budget_tokens nên chỉ cần đảm bảo
+// max_tokens được set (Claude dùng max_tokens làm hard limit cho thinking + response).
 func ensureMaxTokensForThinking(baseModel string, body []byte) []byte {
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
-	if thinkingType != "enabled" {
+	if thinkingType != "enabled" && thinkingType != "adaptive" {
 		return body
 	}
 
+	// Adaptive thinking: không có budget_tokens, chỉ cần đảm bảo max_tokens hợp lý
+	if thinkingType == "adaptive" {
+		return body
+	}
+
+	// Legacy enabled mode: đảm bảo max_tokens > budget_tokens
 	budgetTokens := gjson.GetBytes(body, "thinking.budget_tokens").Int()
 	if budgetTokens <= 0 {
 		return body
@@ -583,15 +592,16 @@ func ensureMaxTokensForThinking(baseModel string, body []byte) []byte {
 	return body
 }
 
-// ensureTemperatureForThinking sets temperature = 1 when thinking is enabled.
-// Claude API requires temperature = 1 when extended thinking is enabled.
+// ensureTemperatureForThinking sets temperature = 1 when thinking is active.
+// Claude API requires temperature = 1 when extended thinking is enabled,
+// bao gồm cả adaptive thinking (Opus 4.6+) và legacy enabled mode.
 // This function should be called after all thinking configuration is finalized.
 func ensureTemperatureForThinking(body []byte) []byte {
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
-	if thinkingType != "enabled" {
+	if thinkingType != "enabled" && thinkingType != "adaptive" {
 		return body
 	}
-	// Khi thinking được bật, Claude API yêu cầu temperature phải là 1
+	// Khi thinking được bật (enabled hoặc adaptive), Claude API yêu cầu temperature phải là 1
 	body, _ = sjson.SetBytes(body, "temperature", 1)
 	return body
 }
@@ -632,10 +642,15 @@ func ensureMaxTokensForThinking(modelName string, body []byte) []byte {
 	return body
 }
 
-// ensureAssistantHasThinkingBlock checks all assistant messages when thinking is enabled.
+// ensureAssistantHasThinkingBlock checks all assistant messages when thinking is enabled (legacy mode).
 // Claude API requires: "When thinking is enabled, a final assistant message must start with
 // a thinking block (preceeding the lastmost set of tool_use and tool_result blocks)"
 // If any assistant message is missing thinking block → disable thinking to avoid API error.
+//
+// LƯU Ý: Hàm này CHỈ apply cho thinking.type="enabled" (legacy mode).
+// Với adaptive thinking (Opus 4.6+), assistant turns KHÔNG cần bắt đầu bằng thinking block.
+// Theo tài liệu: "When using adaptive thinking, previous assistant turns don't need to
+// start with thinking blocks. This is more flexible than manual mode."
 func ensureAssistantHasThinkingBlock(body []byte) []byte {
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
 	if thinkingType != "enabled" {

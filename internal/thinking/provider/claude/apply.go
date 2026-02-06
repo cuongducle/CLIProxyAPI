@@ -30,13 +30,24 @@ func init() {
 //
 // IMPORTANT: This method expects config to be pre-validated by thinking.ValidateConfig.
 // ValidateConfig handles:
-//   - Mode conversion (Level→Budget, Auto→Budget)
+//   - Mode conversion (Level→Budget, Auto→Budget for non-DynamicAllowed models)
 //   - Budget clamping to model range
 //   - ZeroAllowed constraint enforcement
 //
-// Apply only processes ModeBudget and ModeNone; other modes are passed through unchanged.
+// Apply processes ModeBudget, ModeNone, and ModeAuto:
+//   - ModeAuto + DynamicAllowed → thinking.type="adaptive" (Opus 4.6+)
+//   - ModeBudget → thinking.type="enabled" + budget_tokens
+//   - ModeNone → thinking.type="disabled"
 //
-// Expected output format when enabled:
+// Expected output format when adaptive (Opus 4.6+):
+//
+//	{
+//	  "thinking": {
+//	    "type": "adaptive"
+//	  }
+//	}
+//
+// Expected output format when enabled (legacy):
 //
 //	{
 //	  "thinking": {
@@ -60,9 +71,8 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return body, nil
 	}
 
-	// Only process ModeBudget and ModeNone; other modes pass through
-	// (caller should use ValidateConfig first to normalize modes)
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone {
+	// Xử lý ModeBudget, ModeNone, và ModeAuto (adaptive)
+	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
 		return body, nil
 	}
 
@@ -70,19 +80,35 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		body = []byte(`{}`)
 	}
 
-	// Budget is expected to be pre-validated by ValidateConfig (clamped, ZeroAllowed enforced)
-	// Decide enabled/disabled based on budget value
-	if config.Budget == 0 {
+	// ModeNone → disabled
+	if config.Mode == thinking.ModeNone || config.Budget == 0 {
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 		return result, nil
 	}
 
-	result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
-	result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
+	// ModeAuto + DynamicAllowed → adaptive thinking (Opus 4.6+)
+	// Claude tự quyết định khi nào và bao nhiêu thinking, không cần budget_tokens
+	if config.Mode == thinking.ModeAuto && modelInfo.Thinking.DynamicAllowed {
+		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		// Nếu Level=max → set output_config.effort=max (combo mạnh nhất trên Opus 4.6)
+		// Các level khác (low, medium, high) cũng được map sang effort tương ứng
+		if config.Level != "" {
+			result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
+		}
+		return result, nil
+	}
 
-	// Ensure max_tokens > thinking.budget_tokens (Anthropic API constraint)
-	result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
+	// ModeBudget hoặc ModeAuto fallback → enabled + budget_tokens
+	result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
+	if config.Budget > 0 {
+		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
+		// Ensure max_tokens > thinking.budget_tokens (Anthropic API constraint)
+		result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
+	} else {
+		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+	}
 	return result, nil
 }
 
@@ -140,6 +166,9 @@ func (a *Applier) effectiveMaxTokens(body []byte, modelInfo *registry.ModelInfo)
 	return 0, false
 }
 
+// applyCompatibleClaude xử lý thinking cho user-defined model (không có modelInfo).
+// Với user-defined model, ModeAuto mặc định dùng "adaptive" (Opus 4.6+ style)
+// vì không có modelInfo để kiểm tra DynamicAllowed.
 func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
 	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
 		return body, nil
@@ -155,8 +184,13 @@ func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte,
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 		return result, nil
 	case thinking.ModeAuto:
-		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
+		// User-defined model: dùng adaptive (Opus 4.6+ recommended)
+		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		// Nếu có Level (ví dụ max) → set output_config.effort
+		if config.Level != "" {
+			result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
+		}
 		return result, nil
 	default:
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")

@@ -135,6 +135,7 @@ func GetGlobalRegistry() *ModelRegistry {
 }
 
 // LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.
+// Nếu dynamic info thiếu Thinking/MaxCompletionTokens, merge từ static definitions.
 func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
@@ -146,10 +147,25 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 		p = strings.ToLower(strings.TrimSpace(provider[0]))
 	}
 
-	if info := GetGlobalRegistry().GetModelInfo(modelID, p); info != nil {
-		return info
+	dynamicInfo := GetGlobalRegistry().GetModelInfo(modelID, p)
+	if dynamicInfo == nil {
+		return LookupStaticModelInfo(modelID)
 	}
-	return LookupStaticModelInfo(modelID)
+
+	// Merge thinking/completion capabilities từ static definitions nếu dynamic thiếu.
+	// Dynamic model info từ client registration thường không có Thinking support metadata,
+	// nhưng static data chứa thông tin thinking support chính xác cho từng model.
+	staticInfo := LookupStaticModelInfo(modelID)
+	if staticInfo != nil {
+		if dynamicInfo.Thinking == nil && staticInfo.Thinking != nil {
+			dynamicInfo.Thinking = staticInfo.Thinking
+		}
+		if dynamicInfo.MaxCompletionTokens == 0 && staticInfo.MaxCompletionTokens > 0 {
+			dynamicInfo.MaxCompletionTokens = staticInfo.MaxCompletionTokens
+		}
+	}
+
+	return dynamicInfo
 }
 
 // SetHook sets an optional hook for observing model registration changes.
