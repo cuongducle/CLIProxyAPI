@@ -114,16 +114,25 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// ModelAliases định nghĩa mapping từ model alias sang model chuẩn.
+	// Ví dụ: "claude-4.5-sonnet" → "claude-sonnet-4-5"
+	ModelAliases map[string]string `yaml:"model-aliases" json:"model-aliases"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
 // TLSConfig holds HTTPS server settings.
 type TLSConfig struct {
-	// Enable toggles HTTPS server mode.
+	// Enable toggles HTTPS server mode (legacy, use Mode instead).
 	Enable bool `yaml:"enable" json:"enable"`
-	// Cert is the path to the TLS certificate file.
+	// Mode specifies the TLS/HTTP2 mode: "manual", "h2c", or "" (disabled).
+	// - "manual": Use manually provided cert/key files
+	// - "h2c": HTTP/2 cleartext (no TLS, for use behind reverse proxy)
+	// - "" or unset: HTTP/1.1 only (legacy behavior when Enable=false)
+	Mode string `yaml:"mode" json:"mode"`
+	// Cert is the path to the TLS certificate file (used when Mode="manual" or Enable=true).
 	Cert string `yaml:"cert" json:"cert"`
-	// Key is the path to the TLS private key file.
+	// Key is the path to the TLS private key file (used when Mode="manual" or Enable=true).
 	Key string `yaml:"key" json:"key"`
 }
 

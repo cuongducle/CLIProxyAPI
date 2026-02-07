@@ -16,6 +16,7 @@ var levelToBudgetMap = map[string]int{
 	"medium":  8192,
 	"high":    24576,
 	"xhigh":   32768,
+	"max":     -1, // max effort → auto/adaptive thinking (Opus 4.6+)
 }
 
 // ConvertLevelToBudget converts a thinking level to a budget value.

@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,6 +38,8 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"gopkg.in/yaml.v3"
 )
 
@@ -295,13 +298,35 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
 	}
 
-	// Create HTTP server
+	// Create HTTP server with appropriate handler based on TLS mode
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	handler := s.createServerHandler(engine, cfg)
+
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler: engine,
+		Addr:    addr,
+		Handler: handler,
 	}
 
 	return s
+}
+
+// createServerHandler creates the appropriate HTTP handler based on TLS configuration.
+// For h2c mode, it wraps the engine with h2c handler for HTTP/2 cleartext support.
+func (s *Server) createServerHandler(engine *gin.Engine, cfg *config.Config) http.Handler {
+	if cfg == nil {
+		return engine
+	}
+
+	tlsMode := strings.ToLower(strings.TrimSpace(cfg.TLS.Mode))
+
+	// h2c mode: HTTP/2 cleartext (no TLS) - useful behind reverse proxy
+	if tlsMode == "h2c" {
+		h2s := &http2.Server{}
+		log.Info("HTTP/2 cleartext (h2c) mode enabled")
+		return h2c.NewHandler(engine, h2s)
+	}
+
+	return engine
 }
 
 // setupRoutes configures the API routes for the server.
@@ -478,6 +503,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
+		mgmt.GET("/usage/limits", s.mgmt.GetUsageLimits)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
@@ -768,6 +794,11 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 // Start begins listening for and serving HTTP or HTTPS requests.
 // It's a blocking call and will only return on an unrecoverable error.
 //
+// Supports multiple TLS modes:
+//   - "manual": Manual TLS certificates with HTTP/2
+//   - "h2c": HTTP/2 cleartext (no TLS, for use behind reverse proxy)
+//   - "" (empty): HTTP/1.1 only (legacy behavior)
+//
 // Returns:
 //   - error: An error if the server fails to start
 func (s *Server) Start() error {
@@ -775,25 +806,83 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to start HTTP server: server not initialized")
 	}
 
-	useTLS := s.cfg != nil && s.cfg.TLS.Enable
-	if useTLS {
-		cert := strings.TrimSpace(s.cfg.TLS.Cert)
-		key := strings.TrimSpace(s.cfg.TLS.Key)
-		if cert == "" || key == "" {
-			return fmt.Errorf("failed to start HTTPS server: tls.cert or tls.key is empty")
-		}
-		log.Debugf("Starting API server on %s with TLS", s.server.Addr)
-		if errServeTLS := s.server.ListenAndServeTLS(cert, key); errServeTLS != nil && !errors.Is(errServeTLS, http.ErrServerClosed) {
-			return fmt.Errorf("failed to start HTTPS server: %v", errServeTLS)
-		}
-		return nil
+	tlsMode := ""
+	if s.cfg != nil {
+		tlsMode = strings.ToLower(strings.TrimSpace(s.cfg.TLS.Mode))
 	}
 
-	log.Debugf("Starting API server on %s", s.server.Addr)
-	if errServe := s.server.ListenAndServe(); errServe != nil && !errors.Is(errServe, http.ErrServerClosed) {
-		return fmt.Errorf("failed to start HTTP server: %v", errServe)
+	// Handle legacy Enable flag for backwards compatibility
+	useLegacyTLS := s.cfg != nil && s.cfg.TLS.Enable && tlsMode == ""
+
+	switch tlsMode {
+	case "manual":
+		return s.startWithManualTLS()
+	case "h2c":
+		return s.startWithH2C()
+	default:
+		if useLegacyTLS {
+			return s.startWithManualTLS()
+		}
+		return s.startHTTP()
+	}
+}
+
+// startWithManualTLS starts the server with manually provided TLS certificates.
+// This enables HTTP/2 automatically.
+func (s *Server) startWithManualTLS() error {
+	if s.cfg == nil {
+		return fmt.Errorf("failed to start TLS server: config is nil")
 	}
 
+	cert := strings.TrimSpace(s.cfg.TLS.Cert)
+	key := strings.TrimSpace(s.cfg.TLS.Key)
+	if cert == "" || key == "" {
+		return fmt.Errorf("failed to start HTTPS server: tls.cert or tls.key is empty")
+	}
+
+	// Configure TLS for HTTP/2
+	s.server.TLSConfig = &tls.Config{
+		NextProtos: []string{"h2", "http/1.1"},
+		MinVersion: tls.VersionTLS12,
+	}
+
+	// Cấu hình HTTP/2 server với các tham số tối ưu cho streaming
+	// Điều này cần thiết để HTTP/2 hoạt động đúng với các client như Cursor
+	h2s := &http2.Server{
+		// MaxConcurrentStreams giới hạn số stream đồng thời trên một connection
+		MaxConcurrentStreams: 250,
+		// MaxReadFrameSize là kích thước frame tối đa server sẽ đọc
+		MaxReadFrameSize: 1 << 20, // 1MB
+		// IdleTimeout là thời gian connection có thể idle trước khi bị đóng
+		IdleTimeout: 120 * time.Second,
+	}
+	if err := http2.ConfigureServer(s.server, h2s); err != nil {
+		return fmt.Errorf("failed to configure HTTP/2: %v", err)
+	}
+
+	log.Debugf("Starting API server on %s with manual TLS (HTTP/2 enabled)", s.server.Addr)
+	if err := s.server.ListenAndServeTLS(cert, key); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("failed to start HTTPS server: %v", err)
+	}
+	return nil
+}
+
+// startWithH2C starts the server with HTTP/2 cleartext (no TLS).
+// This is useful when running behind a reverse proxy that terminates TLS.
+func (s *Server) startWithH2C() error {
+	log.Debugf("Starting API server on %s with HTTP/2 cleartext (h2c)", s.server.Addr)
+	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("failed to start h2c server: %v", err)
+	}
+	return nil
+}
+
+// startHTTP starts the server in plain HTTP/1.1 mode.
+func (s *Server) startHTTP() error {
+	log.Debugf("Starting API server on %s (HTTP/1.1)", s.server.Addr)
+	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("failed to start HTTP server: %v", err)
+	}
 	return nil
 }
 
@@ -907,6 +996,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if oldCfg == nil || oldCfg.Debug != cfg.Debug {
 		util.SetLogLevel(cfg)
 	}
+
+	// Hot-reload model aliases khi config thay đổi
+	util.SetModelAliases(cfg.ModelAliases)
 
 	prevSecretEmpty := true
 	if oldCfg != nil {

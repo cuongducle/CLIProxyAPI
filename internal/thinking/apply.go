@@ -342,16 +342,23 @@ func hasThinkingConfig(config ThinkingConfig) bool {
 // extractClaudeConfig extracts thinking configuration from Claude format request body.
 //
 // Claude API format:
-//   - thinking.type: "enabled" or "disabled"
+//   - thinking.type: "enabled", "disabled", or "adaptive" (Opus 4.6+)
 //   - thinking.budget_tokens: integer (-1=auto, 0=disabled, >0=budget)
 //
 // Priority: thinking.type="disabled" takes precedence over budget_tokens.
 // When type="enabled" without budget_tokens, returns ModeAuto to indicate
 // the user wants thinking enabled but didn't specify a budget.
+// When type="adaptive" (Opus 4.6+), returns ModeAuto — Claude tự quyết định
+// khi nào và bao nhiêu thinking. Không cần budget_tokens.
 func extractClaudeConfig(body []byte) ThinkingConfig {
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
 	if thinkingType == "disabled" {
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	}
+
+	// Adaptive thinking (Opus 4.6+): Claude tự quyết định thinking allocation
+	if thinkingType == "adaptive" {
+		return ThinkingConfig{Mode: ModeAuto, Budget: -1}
 	}
 
 	// Check budget_tokens

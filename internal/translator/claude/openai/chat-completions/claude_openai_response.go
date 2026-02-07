@@ -12,9 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// Note: deriveSessionIDFromRequest đã bị loại bỏ vì không cần thiết.
+// Cache chỉ cần thinkingID là đủ để lookup.
 
 var (
 	dataTag = []byte("data:")
@@ -27,6 +32,8 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	FinishReason string
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
+	// Thinking accumulator for streaming
+	ThinkingAccumulator map[int]*ThinkingAccumulator
 }
 
 // ToolCallAccumulator holds the state for accumulating tool call data
@@ -34,6 +41,12 @@ type ToolCallAccumulator struct {
 	ID        string
 	Name      string
 	Arguments strings.Builder
+}
+
+// ThinkingAccumulator holds the state for accumulating thinking data
+type ThinkingAccumulator struct {
+	Thinking  strings.Builder
+	Signature strings.Builder
 }
 
 // ConvertClaudeResponseToOpenAI converts Claude Code streaming response format to OpenAI Chat Completions format.
@@ -67,7 +80,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 	eventType := root.Get("type").String()
 
 	// Base OpenAI streaming response template
-	template := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{},"finish_reason":null}]}`
+	template := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{"response_metadata":{}},"finish_reason":null}]}`
 
 	// Set model
 	if modelName != "" {
@@ -100,6 +113,10 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator == nil {
 				(*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
 			}
+			// Initialize thinking accumulator for tracking thinking progress
+			if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator == nil {
+				(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator = make(map[int]*ThinkingAccumulator)
+			}
 		}
 		return []string{template}
 
@@ -125,6 +142,19 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 				// Don't output anything yet - wait for complete tool call
 				return []string{}
+			} else if blockType == "thinking" {
+				// Start of thinking block - initialize accumulator to track thinking and signature
+				index := int(root.Get("index").Int())
+
+				if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator == nil {
+					(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator = make(map[int]*ThinkingAccumulator)
+				}
+
+				(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index] = &ThinkingAccumulator{}
+
+				// Stream opening <think> tag
+				template, _ = sjson.Set(template, "choices.0.delta.content", "<think>\n")
+				return []string{template}
 			}
 		}
 		return []string{}
@@ -143,11 +173,35 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 					hasContent = true
 				}
 			case "thinking_delta":
-				// Accumulate reasoning/thinking content
+				// Stream reasoning/thinking content ngay lập tức
 				if thinking := delta.Get("thinking"); thinking.Exists() {
-					template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", thinking.String())
+					index := int(root.Get("index").Int())
+					// Lưu thinking text gốc (không escape) để cache
+					originalThinkingText := thinking.String()
+					// Escape ``` trong thinking để không break format khi hiển thị
+					//escapedThinkingText := strings.ReplaceAll(originalThinkingText, "```", "\\`\\`\\`")
+					if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator != nil {
+						if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index]; exists {
+							// Lưu text gốc để cache signature đúng
+							accumulator.Thinking.WriteString(originalThinkingText)
+						}
+					}
+					// Stream escaped thinking delta để hiển thị
+					template, _ = sjson.Set(template, "choices.0.delta.content", originalThinkingText)
 					hasContent = true
 				}
+			case "signature_delta":
+				// Accumulate signature for thinking block
+				if signature := delta.Get("signature"); signature.Exists() {
+					index := int(root.Get("index").Int())
+					if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator != nil {
+						if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index]; exists {
+							accumulator.Signature.WriteString(signature.String())
+						}
+					}
+				}
+				// Don't output signature delta
+				return []string{}
 			case "input_json_delta":
 				// Tool use input delta - accumulate arguments for tool calls
 				if partialJSON := delta.Get("partial_json"); partialJSON.Exists() {
@@ -169,8 +223,10 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 		}
 
 	case "content_block_stop":
-		// End of content block - output complete tool call if it's a tool_use block
+		// End of content block - output complete tool call if it's a tool_use block or thinking if it's a thinking block
 		index := int(root.Get("index").Int())
+
+		// Check for tool call accumulator
 		if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator != nil {
 			if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator[index]; exists {
 				// Build complete tool call with accumulated arguments
@@ -190,6 +246,34 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				return []string{template}
 			}
 		}
+
+		// Check for thinking accumulator
+		if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator != nil {
+			if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index]; exists {
+				// Lấy thinking text và signature đã accumulate
+				thinkingText := accumulator.Thinking.String()
+				signatureText := accumulator.Signature.String()
+
+				// Generate thinkingID từ hash của thinking text
+				thinkingID := cache.GenerateThinkingID(thinkingText)
+
+				// Cache thinking với signature
+				if thinkingText != "" {
+					cache.CacheThinking(thinkingID, thinkingText, signatureText)
+					// log.Debugf("Cached thinking block (thinkingID=%s, textLen=%d)", thinkingID, len(thinkingText))
+				}
+
+				// Stream closing </think> tag + hidden thinkId marker
+				closingContent := "\n</think>\n```plaintext:thinkId:" + thinkingID + "```\n"
+				template, _ = sjson.Set(template, "choices.0.delta.content", closingContent)
+
+				// Clean up the accumulator for this index
+				delete((*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator, index)
+
+				return []string{template}
+			}
+		}
+
 		return []string{}
 
 	case "message_delta":
@@ -207,10 +291,11 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			outputTokens := usage.Get("output_tokens").Int()
 			cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
 			cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
-			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokens+cacheCreationInputTokens)
-			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokens)
-			template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens)
-			template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cacheReadInputTokens)
+			template, _ = sjson.Set(template, "usage.input_tokens", inputTokens)
+			template, _ = sjson.Set(template, "usage.output_tokens", outputTokens)
+			template, _ = sjson.Set(template, "usage.cache_read_input_tokens", cacheReadInputTokens)
+			template, _ = sjson.Set(template, "usage.cache_creation_input_tokens", cacheCreationInputTokens)
+			log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
 		}
 		return []string{template}
 
@@ -268,6 +353,7 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 // Returns:
 //   - string: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
+	// log.Debug("ConvertClaudeResponseToOpenAINonStream called")
 	chunks := make([][]byte, 0)
 
 	lines := bytes.Split(rawJSON, []byte("\n"))
@@ -286,7 +372,6 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	var createdAt int64
 	var stopReason string
 	var contentParts []string
-	var reasoningParts []string
 	toolCallsAccumulator := make(map[int]*ToolCallAccumulator)
 
 	for _, chunk := range chunks {
@@ -306,9 +391,10 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			// Handle different content block types at the beginning
 			if contentBlock := root.Get("content_block"); contentBlock.Exists() {
 				blockType := contentBlock.Get("type").String()
+				// index := int(root.Get("index").Int())
+
 				if blockType == "thinking" {
-					// Start of thinking/reasoning content - skip for now as it's handled in delta
-					continue
+
 				} else if blockType == "tool_use" {
 					// Initialize tool call accumulator for this index
 					index := int(root.Get("index").Int())
@@ -323,6 +409,8 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			// Process incremental content updates
 			if delta := root.Get("delta"); delta.Exists() {
 				deltaType := delta.Get("type").String()
+				// index := int(root.Get("index").Int())
+
 				switch deltaType {
 				case "text_delta":
 					// Accumulate text content
@@ -331,9 +419,20 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 					}
 				case "thinking_delta":
 					// Accumulate reasoning/thinking content
-					if thinking := delta.Get("thinking"); thinking.Exists() {
-						reasoningParts = append(reasoningParts, thinking.String())
-					}
+					// if thinking := delta.Get("thinking"); thinking.Exists() {
+					// 	if builder, exists := thinkingTextMap[index]; exists {
+					// 		builder.WriteString(thinking.String())
+					// 		thinkingTextMap[index] = builder
+					// 	}
+					// }
+				case "signature_delta":
+					// Accumulate signature for thinking block
+					// if signature := delta.Get("signature"); signature.Exists() {
+					// 	if builder, exists := thinkingSignatureMap[index]; exists {
+					// 		builder.WriteString(signature.String())
+					// 		thinkingSignatureMap[index] = builder
+					// 	}
+					// }
 				case "input_json_delta":
 					// Accumulate tool call arguments
 					if partialJSON := delta.Get("partial_json"); partialJSON.Exists() {
@@ -346,7 +445,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			}
 
 		case "content_block_stop":
-			// Finalize tool call arguments for this index when content block ends
+			// Finalize tool call arguments or thinking block for this index when content block ends
 			index := int(root.Get("index").Int())
 			if accumulator, exists := toolCallsAccumulator[index]; exists {
 				if accumulator.Arguments.Len() == 0 {
@@ -379,15 +478,9 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	out, _ = sjson.Set(out, "created", createdAt)
 	out, _ = sjson.Set(out, "model", model)
 
-	// Set message content by combining all text parts
-	messageContent := strings.Join(contentParts, "")
-	out, _ = sjson.Set(out, "choices.0.message.content", messageContent)
-
-	// Add reasoning content if available (following OpenAI reasoning format)
-	if len(reasoningParts) > 0 {
-		reasoningContent := strings.Join(reasoningParts, "")
-		// Add reasoning as a separate field in the message
-		out, _ = sjson.Set(out, "choices.0.message.reasoning", reasoningContent)
+	// Set accumulated content
+	if len(contentParts) > 0 {
+		out, _ = sjson.Set(out, "choices.0.message.content", strings.Join(contentParts, ""))
 	}
 
 	// Set tool calls if any were accumulated during processing
@@ -427,6 +520,20 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	} else {
 		out, _ = sjson.Set(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))
 	}
+
+	// // Set usage information including prompt tokens, completion tokens, and total tokens
+	// totalTokens := inputTokens + outputTokens
+	// out, _ = sjson.Set(out, "usage.prompt_tokens", inputTokens)
+	// out, _ = sjson.Set(out, "usage.completion_tokens", outputTokens)
+	// out, _ = sjson.Set(out, "usage.total_tokens", totalTokens)
+
+	// // Add reasoning tokens to usage details if any reasoning content was processed
+	// if reasoningTokens > 0 {
+	// 	out, _ = sjson.Set(out, "usage.completion_tokens_details.reasoning_tokens", reasoningTokens)
+	// }
+
+	// // Log thông tin token usage cho request Claude
+	// log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, totalTokens: %d, reasoningTokens: %d.", model, inputTokens, outputTokens, totalTokens, reasoningTokens)
 
 	return out
 }

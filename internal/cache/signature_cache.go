@@ -16,7 +16,10 @@ type SignatureEntry struct {
 
 const (
 	// SignatureCacheTTL is how long signatures are valid
-	SignatureCacheTTL = 3 * time.Hour
+	SignatureCacheTTL = 2 * time.Hour
+
+	// MaxEntriesPerSession limits memory usage per session
+	MaxEntriesPerSession = 100
 
 	// SignatureTextHashLen is the length of the hash key (16 hex chars = 64-bit key space)
 	SignatureTextHashLen = 16
@@ -192,4 +195,92 @@ func GetModelGroup(modelName string) string {
 		return "gemini"
 	}
 	return modelName
+}
+
+// ============================================================================
+// Thinking Cache - Lưu trữ toàn bộ thinking text + signature theo thinkingID
+// ============================================================================
+
+// ThinkingEntry holds cached thinking content with signature
+type ThinkingEntry struct {
+	ThinkingText string
+	Signature    string
+	Timestamp    time.Time
+}
+
+const (
+	// ThinkingCacheTTL là thời gian thinking cache còn hiệu lực (dài hơn signature cache)
+	ThinkingCacheTTL = 2 * time.Hour
+
+	// MaxThinkingEntriesPerSession giới hạn số thinking entries mỗi session
+	MaxThinkingEntriesPerSession = 100
+
+	// ThinkingIDLen là độ dài của thinkingID (32 hex chars = 128-bit)
+	ThinkingIDLen = 32
+)
+
+// thinkingCache stores thinking by sessionId -> thinkingId -> ThinkingEntry
+var thinkingCache sync.Map
+
+// thinkingSessionCache là inner map type cho thinking cache
+type thinkingSessionCache struct {
+	mu      sync.RWMutex
+	entries map[string]ThinkingEntry
+}
+
+// GenerateThinkingID tạo hash-based ID từ thinking text
+func GenerateThinkingID(thinkingText string) string {
+	h := sha256.Sum256([]byte(thinkingText))
+	return hex.EncodeToString(h[:])[:ThinkingIDLen]
+}
+
+// CacheThinking lưu thinking content với signature theo thinkingID
+// Note: Đã loại bỏ sessionID vì không cần thiết - chỉ cần thinkingID là đủ
+func CacheThinking(thinkingID, thinkingText, signature string) {
+	if thinkingID == "" || thinkingText == "" {
+		return
+	}
+
+	entry := ThinkingEntry{
+		ThinkingText: thinkingText,
+		Signature:    signature,
+		Timestamp:    time.Now(),
+	}
+
+	thinkingCache.Store(thinkingID, entry)
+}
+
+// GetCachedThinking lấy cached thinking entry theo thinkingID
+// Trả về nil nếu không tìm thấy hoặc đã expired
+func GetCachedThinking(thinkingID string) *ThinkingEntry {
+	if thinkingID == "" {
+		return nil
+	}
+
+	val, ok := thinkingCache.Load(thinkingID)
+	if !ok {
+		return nil
+	}
+
+	entry := val.(ThinkingEntry)
+
+	// Check if expired
+	if time.Since(entry.Timestamp) > ThinkingCacheTTL {
+		thinkingCache.Delete(thinkingID)
+		return nil
+	}
+
+	return &entry
+}
+
+// ClearThinkingCache xóa thinking cache cho một thinkingID cụ thể hoặc tất cả
+func ClearThinkingCache(thinkingID string) {
+	if thinkingID != "" {
+		thinkingCache.Delete(thinkingID)
+	} else {
+		thinkingCache.Range(func(key, _ any) bool {
+			thinkingCache.Delete(key)
+			return true
+		})
+	}
 }

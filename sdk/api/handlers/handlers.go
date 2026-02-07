@@ -622,6 +622,7 @@ func statusFromError(err error) int {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	// Resolve "auto" model to an actual available model first
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -635,10 +636,18 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 		resolvedModelName = util.ResolveAutoModel(modelName)
 	}
 
+	// CRITICAL: Resolve alias BEFORE provider lookup
+	// This allows "claude-4.5-opus-thinking" to become "claude-opus-4-5-20251101(high)"
+	// which can then be found in the registry
+	resolvedModelName = util.ResolveModelAlias(resolvedModelName)
+
+	// Parse thinking suffix to get base model for provider lookup
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
+	// Use the baseModel to get the provider name
 	providers = util.GetProviderName(baseModel)
+
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
 	// may be registered with their full suffixed name (e.g., "my-model(8192)").

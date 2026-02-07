@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	log "github.com/sirupsen/logrus"
 )
 
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
@@ -37,30 +38,68 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
-		// Capture request information
-		requestInfo, err := captureRequestInfo(c)
-		if err != nil {
-			// Log error but continue processing
-			// In a real implementation, you might want to use a proper logger here
-			c.Next()
-			return
-		}
+	// Bắt đầu tracking thời gian
+	startTime := time.Now()
 
-		// Create response writer wrapper
-		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
-		if !logger.IsEnabled() {
-			wrapper.logOnErrorOnly = true
-		}
-		c.Writer = wrapper
-
-		// Process the request
+	// Capture request information
+	requestInfo, err := captureRequestInfo(c)
+	if err != nil {
+		// Log error but continue processing
+		log.WithFields(log.Fields{
+			"request_id": logging.GetGinRequestID(c),
+			"error":      err.Error(),
+		}).Error("Failed to capture request info")
 		c.Next()
+		return
+	}
 
-		// Finalize logging after request processing
-		if err = wrapper.Finalize(c); err != nil {
-			// Log error but don't interrupt the response
-			// In a real implementation, you might want to use a proper logger here
-		}
+	// Log ngay khi nhận request
+	log.WithFields(log.Fields{
+		"request_id": requestInfo.RequestID,
+		"method":     requestInfo.Method,
+		"path":       requestInfo.URL,
+		"client_ip":  c.ClientIP(),
+	}).Info("🔵 Request received")
+
+	// Create response writer wrapper
+	wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
+	if !logger.IsEnabled() {
+		wrapper.logOnErrorOnly = true
+	}
+	c.Writer = wrapper
+
+	// Process the request
+	c.Next()
+
+	// Tính toán thời gian xử lý
+	duration := time.Since(startTime)
+
+	// Log khi request hoàn thành
+	statusCode := c.Writer.Status()
+	logEntry := log.WithFields(log.Fields{
+		"request_id": requestInfo.RequestID,
+		"method":     requestInfo.Method,
+		"path":       requestInfo.URL,
+		"status":     statusCode,
+		"duration":   duration.String(),
+		"duration_ms": duration.Milliseconds(),
+	})
+
+	if statusCode >= 500 {
+		logEntry.Error("🔴 Request completed with server error")
+	} else if statusCode >= 400 {
+		logEntry.Warn("🟡 Request completed with client error")
+	} else {
+		logEntry.Info("🟢 Request completed successfully")
+	}
+
+	// Finalize logging after request processing
+	if err = wrapper.Finalize(c); err != nil {
+		log.WithFields(log.Fields{
+			"request_id": requestInfo.RequestID,
+			"error":      err.Error(),
+		}).Error("Failed to finalize request logging")
+	}
 	}
 }
 

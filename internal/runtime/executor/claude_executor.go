@@ -124,6 +124,16 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 
+	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
+	body = ensureMaxTokensForThinking(baseModel, body)
+
+	// Ensure temperature = 1 when thinking is enabled
+	body = ensureTemperatureForThinking(body)
+
+	// Ensure all assistant messages have thinking blocks when thinking is enabled
+	// This prevents "assistant message must start with thinking block" errors
+	body = ensureAssistantHasThinkingBlock(body)
+
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
 		body = ensureCacheControl(body)
@@ -168,6 +178,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
+	captureClaudeRateLimit(httpResp.Header, reporter.source, baseModel)
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
@@ -265,6 +276,16 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 
+	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
+	body = ensureMaxTokensForThinking(baseModel, body)
+
+	// Ensure temperature = 1 when thinking is enabled
+	body = ensureTemperatureForThinking(body)
+
+	// Ensure all assistant messages have thinking blocks when thinking is enabled
+	// This prevents "assistant message must start with thinking block" errors
+	body = ensureAssistantHasThinkingBlock(body)
+
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
 		body = ensureCacheControl(body)
@@ -309,6 +330,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		recordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
+	captureClaudeRateLimit(httpResp.Header, reporter.source, baseModel)
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
@@ -545,6 +567,57 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
+// ensureMaxTokensForThinking ensures max_tokens > thinking.budget_tokens when thinking is enabled.
+// Claude API requires max_tokens to be greater than budget_tokens for extended thinking.
+// If max_tokens is not set or too low, it adjusts to budget_tokens + default output allowance.
+//
+// Với adaptive thinking (Opus 4.6+), không có budget_tokens nên chỉ cần đảm bảo
+// max_tokens được set (Claude dùng max_tokens làm hard limit cho thinking + response).
+func ensureMaxTokensForThinking(baseModel string, body []byte) []byte {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "enabled" && thinkingType != "adaptive" {
+		return body
+	}
+
+	// Adaptive thinking: không có budget_tokens, chỉ cần đảm bảo max_tokens hợp lý
+	if thinkingType == "adaptive" {
+		return body
+	}
+
+	// Legacy enabled mode: đảm bảo max_tokens > budget_tokens
+	budgetTokens := gjson.GetBytes(body, "thinking.budget_tokens").Int()
+	if budgetTokens <= 0 {
+		return body
+	}
+
+	maxTokens := gjson.GetBytes(body, "max_tokens").Int()
+
+	// Nếu max_tokens chưa được set hoặc <= budget_tokens, điều chỉnh
+	if maxTokens <= budgetTokens {
+		// Thêm 8192 tokens cho response (hoặc tối thiểu budget + 1024)
+		newMaxTokens := budgetTokens + 8192
+		if newMaxTokens < budgetTokens+1024 {
+			newMaxTokens = budgetTokens + 1024
+		}
+		body, _ = sjson.SetBytes(body, "max_tokens", newMaxTokens)
+	}
+	return body
+}
+
+// ensureTemperatureForThinking sets temperature = 1 when thinking is active.
+// Claude API requires temperature = 1 when extended thinking is enabled,
+// bao gồm cả adaptive thinking (Opus 4.6+) và legacy enabled mode.
+// This function should be called after all thinking configuration is finalized.
+func ensureTemperatureForThinking(body []byte) []byte {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "enabled" && thinkingType != "adaptive" {
+		return body
+	}
+	// Khi thinking được bật (enabled hoặc adaptive), Claude API yêu cầu temperature phải là 1
+	body, _ = sjson.SetBytes(body, "temperature", 1)
+	return body
+}
+
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
 // Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
 // See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
@@ -555,6 +628,62 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 		// Remove thinking configuration entirely to avoid API error
 		body, _ = sjson.DeleteBytes(body, "thinking")
 	}
+	return body
+}
+
+// ensureAssistantHasThinkingBlock checks all assistant messages when thinking is enabled (legacy mode).
+// Claude API requires: "When thinking is enabled, a final assistant message must start with
+// a thinking block (preceeding the lastmost set of tool_use and tool_result blocks)"
+// If any assistant message is missing thinking block → disable thinking to avoid API error.
+//
+// LƯU Ý: Hàm này CHỈ apply cho thinking.type="enabled" (legacy mode).
+// Với adaptive thinking (Opus 4.6+), assistant turns KHÔNG cần bắt đầu bằng thinking block.
+// Theo tài liệu: "When using adaptive thinking, previous assistant turns don't need to
+// start with thinking blocks. This is more flexible than manual mode."
+func ensureAssistantHasThinkingBlock(body []byte) []byte {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "enabled" {
+		return body
+	}
+
+	messagesResult := gjson.GetBytes(body, "messages")
+	if !messagesResult.IsArray() || len(messagesResult.Array()) == 0 {
+		return body
+	}
+
+	messages := messagesResult.Array()
+
+	// Scan ALL assistant messages - Claude requires thinking block in every assistant turn
+	for i := 0; i < len(messages); i++ {
+		if messages[i].Get("role").String() != "assistant" {
+			continue
+		}
+
+		content := messages[i].Get("content")
+
+		// Case 1: content là string → không có thinking block
+		if content.Type == gjson.String {
+			body, _ = sjson.DeleteBytes(body, "thinking")
+			return body
+		}
+
+		// Case 2: content không phải array hoặc empty
+		if !content.IsArray() || len(content.Array()) == 0 {
+			body, _ = sjson.DeleteBytes(body, "thinking")
+			return body
+		}
+
+		// Case 3: content là array, check phần tử đầu tiên
+		contentArray := content.Array()
+		firstContentType := contentArray[0].Get("type").String()
+
+		// Nếu không bắt đầu bằng thinking hoặc redacted_thinking → disable
+		if firstContentType != "thinking" && firstContentType != "redacted_thinking" {
+			body, _ = sjson.DeleteBytes(body, "thinking")
+			return body
+		}
+	}
+
 	return body
 }
 
@@ -638,6 +767,34 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
+// filterExcludedBetas loại bỏ các beta header không mong muốn
+// Các beta có prefix trong danh sách sẽ bị loại bỏ
+var excludedBetaPrefixes = []string{
+	"context-1m-2025-08-07", // Ví dụ: context-1m-2025-08-07
+}
+
+func filterExcludedBetas(betas string) string {
+	parts := strings.Split(betas, ",")
+	var filtered []string
+	for _, beta := range parts {
+		beta = strings.TrimSpace(beta)
+		if beta == "" {
+			continue
+		}
+		excluded := false
+		for _, prefix := range excludedBetaPrefixes {
+			if strings.HasPrefix(beta, prefix) {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			filtered = append(filtered, beta)
+		}
+	}
+	return strings.Join(filtered, ",")
+}
+
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string) {
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
 	isAnthropicBase := r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") && strings.EqualFold(r.URL.Host, "api.anthropic.com")
@@ -657,8 +814,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	promptCachingBeta := "prompt-caching-2024-07-31"
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14," + promptCachingBeta
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
-		baseBetas = val
-		if !strings.Contains(val, "oauth") {
+		// Filter loại bỏ các beta không mong muốn
+		val = filterExcludedBetas(val)
+		if val != "" {
+			baseBetas = val
+		}
+		if !strings.Contains(baseBetas, "oauth") {
 			baseBetas += ",oauth-2025-04-20"
 		}
 	}
@@ -668,13 +829,25 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 
 	// Merge extra betas from request body
 	if len(extraBetas) > 0 {
+		// Filter loại bỏ các beta không mong muốn từ extraBetas
 		existingSet := make(map[string]bool)
 		for _, b := range strings.Split(baseBetas, ",") {
 			existingSet[strings.TrimSpace(b)] = true
 		}
 		for _, beta := range extraBetas {
 			beta = strings.TrimSpace(beta)
-			if beta != "" && !existingSet[beta] {
+			if beta == "" || existingSet[beta] {
+				continue
+			}
+			// Kiểm tra beta có bị exclude không
+			excluded := false
+			for _, prefix := range excludedBetaPrefixes {
+				if strings.HasPrefix(beta, prefix) {
+					excluded = true
+					break
+				}
+			}
+			if !excluded {
 				baseBetas += "," + beta
 				existingSet[beta] = true
 			}
@@ -992,7 +1165,14 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	}
 
 	// Determine if cloaking should be applied
-	if !shouldCloak(cloakMode, clientUserAgent) {
+	doCloak := shouldCloak(cloakMode, clientUserAgent)
+	// Skip cloaking when request has tools - clients like Cursor need system prompt for tool use.
+	// Cursor may send User-Agent "Go-http-client/2.0" (no "cursor" substring), so UA check can miss.
+	hasTools := gjson.GetBytes(payload, "tools")
+	if hasTools.Exists() && hasTools.IsArray() && len(hasTools.Array()) > 0 {
+		doCloak = false
+	}
+	if !doCloak {
 		return payload
 	}
 

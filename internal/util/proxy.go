@@ -5,6 +5,7 @@ package util
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,8 +16,8 @@ import (
 )
 
 // SetProxy configures the provided HTTP client with proxy settings from the configuration.
-// It supports SOCKS5, HTTP, and HTTPS proxies. The function modifies the client's transport
-// to route requests through the configured proxy server.
+// It supports SOCKS5, HTTP, and HTTPS proxies with HTTP/2 enabled for optimal streaming performance.
+// The function modifies the client's transport to route requests through the configured proxy server.
 func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 	var transport *http.Transport
 	// Attempt to parse the proxy URL from the configuration.
@@ -36,15 +37,21 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 				log.Errorf("create SOCKS5 dialer failed: %v", errSOCKS5)
 				return httpClient
 			}
-			// Set up a custom transport using the SOCKS5 dialer.
+			// Set up a custom transport using the SOCKS5 dialer with HTTP/2 support.
 			transport = &http.Transport{
+				ForceAttemptHTTP2: true,
+				TLSClientConfig:   &tls.Config{},
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return dialer.Dial(network, addr)
 				},
 			}
 		} else if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
-			// Configure HTTP or HTTPS proxy.
-			transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+			// Configure HTTP or HTTPS proxy with HTTP/2 support.
+			transport = &http.Transport{
+				ForceAttemptHTTP2: true,
+				TLSClientConfig:   &tls.Config{},
+				Proxy:             http.ProxyURL(proxyURL),
+			}
 		}
 	}
 	// If a new transport was created, apply it to the HTTP client.

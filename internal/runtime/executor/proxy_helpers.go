@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,6 +19,9 @@ import (
 // 1. Use auth.ProxyURL if configured (highest priority)
 // 2. Use cfg.ProxyURL if auth proxy is not configured
 // 3. Use RoundTripper from context if neither are configured
+// 4. Use HTTP/2 enabled transport as default
+//
+// All transports are configured with HTTP/2 support for optimal streaming performance.
 //
 // Parameters:
 //   - ctx: The context containing optional RoundTripper
@@ -26,7 +30,7 @@ import (
 //   - timeout: The client timeout (0 means no timeout)
 //
 // Returns:
-//   - *http.Client: An HTTP client with configured proxy or transport
+//   - *http.Client: An HTTP client with configured proxy or transport (HTTP/2 enabled)
 func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	httpClient := &http.Client{}
 	if timeout > 0 {
@@ -44,7 +48,7 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	// If we have a proxy URL configured, set up the transport
+	// If we have a proxy URL configured, set up the transport with HTTP/2 support
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
@@ -58,19 +62,23 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
+		return httpClient
 	}
+
+	// Priority 4: Use default HTTP/2 enabled transport
+	httpClient.Transport = buildHTTP2Transport()
 
 	return httpClient
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.
-// It supports SOCKS5, HTTP, and HTTPS proxy protocols.
+// It supports SOCKS5, HTTP, and HTTPS proxy protocols with HTTP/2 enabled.
 //
 // Parameters:
 //   - proxyURL: The proxy URL string (e.g., "socks5://user:pass@host:port", "http://host:port")
 //
 // Returns:
-//   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
+//   - *http.Transport: A configured transport with HTTP/2 support, or nil if the proxy URL is invalid
 func buildProxyTransport(proxyURL string) *http.Transport {
 	if proxyURL == "" {
 		return nil
@@ -98,19 +106,37 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 			log.Errorf("create SOCKS5 dialer failed: %v", errSOCKS5)
 			return nil
 		}
-		// Set up a custom transport using the SOCKS5 dialer
+		// Set up a custom transport using the SOCKS5 dialer with HTTP/2 support
 		transport = &http.Transport{
+			ForceAttemptHTTP2: true,
+			TLSClientConfig:   &tls.Config{},
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return dialer.Dial(network, addr)
 			},
 		}
 	} else if parsedURL.Scheme == "http" || parsedURL.Scheme == "https" {
-		// Configure HTTP or HTTPS proxy
-		transport = &http.Transport{Proxy: http.ProxyURL(parsedURL)}
+		// Configure HTTP or HTTPS proxy with HTTP/2 support
+		transport = &http.Transport{
+			ForceAttemptHTTP2: true,
+			TLSClientConfig:   &tls.Config{},
+			Proxy:             http.ProxyURL(parsedURL),
+		}
 	} else {
 		log.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
 		return nil
 	}
 
 	return transport
+}
+
+// buildHTTP2Transport creates an HTTP transport with HTTP/2 enabled but no proxy.
+// Use this when you need HTTP/2 support without a proxy configuration.
+//
+// Returns:
+//   - *http.Transport: A configured transport with HTTP/2 support
+func buildHTTP2Transport() *http.Transport {
+	return &http.Transport{
+		ForceAttemptHTTP2: true,
+		TLSClientConfig:   &tls.Config{},
+	}
 }

@@ -119,6 +119,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return e.executeClaudeNonStream(ctx, auth, req, opts)
 	}
 
+	ctx = context.WithValue(ctx, "antigravity.hasTools", len(gjson.GetBytes(req.Payload, "tools").Array()) > 0)
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -261,6 +262,7 @@ attemptLoop:
 func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
+	ctx = context.WithValue(ctx, "antigravity.hasTools", len(gjson.GetBytes(req.Payload, "tools").Array()) > 0)
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -652,6 +654,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	ctx = context.WithValue(ctx, "alt", "")
+	// Pass hasTools from original request so buildRequest can skip system injection when client needs tool instructions.
+	hasTools := len(gjson.GetBytes(req.Payload, "tools").Array()) > 0
+	ctx = context.WithValue(ctx, "antigravity.hasTools", hasTools)
 
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
@@ -1298,14 +1303,22 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	}
 
 	if useAntigravitySchema {
-		systemInstructionPartsResult := gjson.Get(payloadStr, "request.systemInstruction.parts")
-		payloadStr, _ = sjson.Set(payloadStr, "request.systemInstruction.role", "user")
-		payloadStr, _ = sjson.Set(payloadStr, "request.systemInstruction.parts.0.text", systemInstruction)
-		payloadStr, _ = sjson.Set(payloadStr, "request.systemInstruction.parts.1.text", fmt.Sprintf("Please ignore following [ignore]%s[/ignore]", systemInstruction))
-
-		if systemInstructionPartsResult.Exists() && systemInstructionPartsResult.IsArray() {
-			for _, partResult := range systemInstructionPartsResult.Array() {
-				payloadStr, _ = sjson.SetRaw(payloadStr, "request.systemInstruction.parts.-1", partResult.Raw)
+		// When request has tools (e.g. Cursor), preserve user's system prompt -
+		// do not prepend Antigravity instruction which would override tool instructions.
+		// Use original request's tools flag from context (translated payload may not have request.tools).
+		hasTools := false
+		if v := ctx.Value("antigravity.hasTools"); v != nil {
+			hasTools, _ = v.(bool)
+		}
+		if !hasTools {
+			systemInstructionPartsResult := gjson.Get(payloadStr, "request.systemInstruction.parts")
+			payloadStr, _ = sjson.Set(payloadStr, "request.systemInstruction.role", "user")
+			payloadStr, _ = sjson.Set(payloadStr, "request.systemInstruction.parts.0.text", systemInstruction)
+			payloadStr, _ = sjson.Set(payloadStr, "request.systemInstruction.parts.1.text", fmt.Sprintf("Please ignore following [ignore]%s[/ignore]", systemInstruction))
+			if systemInstructionPartsResult.Exists() && systemInstructionPartsResult.IsArray() {
+				for _, partResult := range systemInstructionPartsResult.Array() {
+					payloadStr, _ = sjson.SetRaw(payloadStr, "request.systemInstruction.parts.-1", partResult.Raw)
+				}
 			}
 		}
 	}

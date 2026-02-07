@@ -5,11 +5,23 @@ host: ""
 # Server port
 port: 8317
 
-# TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
+# TLS settings for HTTPS/HTTP2. Multiple modes available:
 tls:
   enable: false
   cert: ""
   key: ""
+
+# TLS Mode Examples:
+#
+# Option 1: Manual TLS certificates
+# tls:
+#   mode: manual
+#   cert: /path/to/cert.pem
+#   key: /path/to/key.pem
+#
+# Option 2: h2c mode (HTTP/2 cleartext, for use behind reverse proxy)
+# tls:
+#   mode: h2c
 
 # Management API settings
 remote-management:
@@ -39,6 +51,21 @@ api-keys:
 
 # Enable debug logging
 debug: false
+
+# Model aliases: Map custom model names to standard model names.
+# This allows you to use alternative naming conventions without modifying code.
+# Examples:
+#   "claude-4.5-sonnet" maps to "claude-sonnet-4-5"
+#   "claude-4.5-opus-thinking" maps to "claude-opus-4-5-thinking"
+model-aliases:
+  # Claude 4.5 aliases (alternative naming format)
+  claude-4.5-sonnet: "claude-sonnet-4-5-20250929"
+  claude-4.5-sonnet-thinking: "claude-sonnet-4-5-20250929(medium)"
+  claude-4.5-opus-high: "claude-opus-4-5-20251101"
+  claude-4.5-opus-high-thinking: "claude-opus-4-5-20251101(high)"
+  
+  # Add more custom aliases here as needed
+  # custom-model-name: "standard-model-name"
 
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:

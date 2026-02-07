@@ -26,7 +26,6 @@ auths/*
 !auths/.gitkeep
 
 # Documentation
-docs/*
 AGENTS.md
 CLAUDE.md
 GEMINI.md
@@ -48,3 +47,4 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+usage_statistics.json

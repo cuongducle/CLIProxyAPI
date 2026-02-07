@@ -36,8 +36,16 @@ func shouldCloak(cloakMode string, userAgent string) bool {
 	case "never":
 		return false
 	default: // "auto" or empty
-		// If client is Claude Code, don't cloak
-		return !strings.HasPrefix(userAgent, "claude-cli")
+		// Don't cloak for Claude Code - it expects its own system prompt
+		if strings.HasPrefix(userAgent, "claude-cli") {
+			return false
+		}
+		// Don't cloak for Cursor - it needs its system prompt preserved for tool use
+		// See: https://github.com/router-for-me/CLIProxyAPI/issues/601
+		if strings.Contains(strings.ToLower(userAgent), "cursor") {
+			return false
+		}
+		return true
 	}
 }
 
