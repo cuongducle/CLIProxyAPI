@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
-[[ -f config.yaml ]] || cp config.example.yaml config.yaml
 [[ -x ./cli-proxy-api ]] || go build -o cli-proxy-api ./cmd/server
 pgrep -f "[\/]cli-proxy-api" >/dev/null || nohup ./cli-proxy-api > logs.setup.cli.log 2>&1 &
 
@@ -27,4 +25,9 @@ PY
 done
 
 echo "Tunnel URL chưa thấy trong log: logs.setup.cloudflared.log"
+if [[ -f logs.setup.cloudflared.log ]]; then
+  echo "--- Nội dung log cloudflared ---"
+  cat logs.setup.cloudflared.log
+  echo "--- Kết thúc log ---"
+fi
 exit 1
