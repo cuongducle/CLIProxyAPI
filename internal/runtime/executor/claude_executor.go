@@ -1267,7 +1267,14 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	}
 
 	// Determine if cloaking should be applied
-	if !shouldCloak(cloakMode, clientUserAgent) {
+	doCloak := shouldCloak(cloakMode, clientUserAgent)
+	// Skip cloaking when request has tools - clients like Cursor need system prompt for tool use.
+	// Cursor may send User-Agent "Go-http-client/2.0" (no "cursor" substring), so UA check can miss.
+	hasTools := gjson.GetBytes(payload, "tools")
+	if hasTools.Exists() && hasTools.IsArray() && len(hasTools.Array()) > 0 {
+		doCloak = false
+	}
+	if !doCloak {
 		return payload
 	}
 
