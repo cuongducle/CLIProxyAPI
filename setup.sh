@@ -2,11 +2,23 @@
 set -euo pipefail
 
 RESET_TUNNEL=false
-if [[ "${1-}" == "--reset-tunnel" ]]; then
-  RESET_TUNNEL=true
-fi
+DEBUG=false
+for arg in "${@:-}"; do
+  case "$arg" in
+    --reset)  RESET_TUNNEL=true ;;
+    --debug)  DEBUG=true ;;
+  esac
+done
 
-[[ -x ./cli-proxy-api ]] || go build -o cli-proxy-api ./cmd/server
+if [[ "$DEBUG" == true ]]; then
+  go build -o cli-proxy-api ./cmd/server
+  export CURSOR_DEBUG_LOG="${CURSOR_DEBUG_LOG:-$(pwd)/.cursor/debug.log}"
+  mkdir -p "$(dirname "$CURSOR_DEBUG_LOG")"
+  pkill -f "[\/]cli-proxy-api" 2>/dev/null || true
+  sleep 1
+else
+  [[ -x ./cli-proxy-api ]] || go build -o cli-proxy-api ./cmd/server
+fi
 pgrep -f "[\/]cli-proxy-api" >/dev/null || nohup ./cli-proxy-api > logs.setup.cli.log 2>&1 &
 
 start_tunnel() {
@@ -64,5 +76,5 @@ if [[ -f logs.setup.cloudflared.log ]]; then
   cat logs.setup.cloudflared.log
   echo "--- Kết thúc log ---"
 fi
-echo "Gợi ý: chạy 'bash setup.sh --reset-tunnel' để ép tạo tunnel mới."
+echo "Gợi ý: chạy 'bash setup.sh --reset' để ép tạo tunnel mới."
 exit 1
