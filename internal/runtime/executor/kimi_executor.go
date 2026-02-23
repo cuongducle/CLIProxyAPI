@@ -170,7 +170,11 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	from := opts.SourceFormat
 	if from.String() == "claude" {
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
-		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
+		streamResult, streamErr := e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
+		if streamErr != nil {
+			return nil, streamErr
+		}
+		return streamResult, nil
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName

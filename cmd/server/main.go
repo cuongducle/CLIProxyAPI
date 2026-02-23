@@ -55,10 +55,6 @@ func loadConfigWithAliases(configFile string, optional bool) (*config.Config, er
 	if err != nil {
 		return nil, err
 	}
-	// Setup model aliases từ config
-	if cfg != nil {
-		util.SetModelAliases(cfg.ModelAliases)
-	}
 	return cfg, nil
 }
 

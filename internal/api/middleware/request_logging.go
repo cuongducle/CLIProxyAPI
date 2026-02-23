@@ -43,8 +43,8 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 	// Bắt đầu tracking thời gian
 	startTime := time.Now()
 
-	// Capture request information
-	requestInfo, err := captureRequestInfo(c)
+		// Capture request information
+		requestInfo, err := captureRequestInfo(c, shouldCaptureRequestBody(logger.IsEnabled(), c.Request))
 	if err != nil {
 		// Log error but continue processing
 		log.WithFields(log.Fields{

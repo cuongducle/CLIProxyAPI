@@ -739,37 +739,31 @@ func statusFromError(err error) int {
 	return 0
 }
 
-	// CRITICAL: Resolve alias BEFORE provider lookup
-	// This allows "claude-4.5-opus-thinking" to become "claude-opus-4-5-thinking"
-	// which can then be found in the registry
-	resolvedModelName = util.ResolveModelAlias(resolvedModelName)
-
-	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
-	normalizedModel, metadata = normalizeModelMetadata(targetModelName)
-
-	if isDynamic {
-		providers = []string{providerName}
+func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	resolvedModelName := modelName
+	initialSuffix := thinking.ParseSuffix(modelName)
+	if initialSuffix.ModelName == "auto" {
+		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+		if initialSuffix.HasSuffix {
+			resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
+		} else {
+			resolvedModelName = resolvedBase
+		}
 	} else {
-		// For non-dynamic models, try to find provider using the alias-resolved model name first
-		providers = util.GetProviderName(targetModelName)
-		
-		// If not found, try with normalized model
-		if len(providers) == 0 {
-			providers = util.GetProviderName(normalizedModel)
-		}
-		if len(providers) == 0 && metadata != nil {
-			if originalRaw, ok := metadata[util.ThinkingOriginalModelMetadataKey]; ok {
-				if originalModel, okStr := originalRaw.(string); okStr {
-					originalModel = strings.TrimSpace(originalModel)
-					if originalModel != "" && !strings.EqualFold(originalModel, normalizedModel) {
-						if altProviders := util.GetProviderName(originalModel); len(altProviders) > 0 {
-							providers = altProviders
-							normalizedModel = originalModel
-						}
-					}
-				}
-			}
-		}
+		resolvedModelName = util.ResolveAutoModel(modelName)
+	}
+
+	parsed := thinking.ParseSuffix(resolvedModelName)
+	baseModel := strings.TrimSpace(parsed.ModelName)
+
+	providers = util.GetProviderName(baseModel)
+	// Fallback: if baseModel has no provider but differs from resolvedModelName,
+	// try using the full model name. This handles edge cases where custom models
+	// may be registered with their full suffixed name (e.g., "my-model(8192)").
+	// Evaluated in Story 11.8: This fallback is intentionally preserved to support
+	// custom model registrations that include thinking suffixes.
+	if len(providers) == 0 && baseModel != resolvedModelName {
+		providers = util.GetProviderName(resolvedModelName)
 	}
 
 	if len(providers) == 0 {
